@@ -1,0 +1,5 @@
+# The bridge core runs on the Python standard library alone.
+# These optional packages improve geographic precision:
+#   phonenumbers>=8.13   # phone -> country/region, and E.164 of national numbers
+#   geoip2>=4.8          # IP -> city coordinates from a local GeoLite2 database
+# Install them with:  pip install -e '.[geo]'
