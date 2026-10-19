@@ -19,3 +19,25 @@ services:
       # compiled for Linux and must not be shadowed by a host install.
       - .:/app
       - /app/node_modules
+
+  # Optional research sidecar for the Casefile layer (docs/CASEFILE.md). It runs
+  # the research tools and files their findings into cases. Start it with
+  # `docker compose --profile casefile up`; without the profile the app runs
+  # exactly as before. Like the app, it is published to loopback only — it
+  # brokers whatever tool access and keys you give it.
+  casefile-bridge:
+    profiles: ["casefile"]
+    build: ./casefile-bridge
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      # The app reaches the bridge over the compose network; the token is the
+      # gate. Set CASEFILE_BRIDGE_TOKEN in your environment or .env.
+      CASEFILE_BRIDGE_TOKEN: "${CASEFILE_BRIDGE_TOKEN:-}"
+      GEV_URL: "http://gods-eye-view:4173"
+      CASEFILE_STORE: "/app/.gev-cache/casefile"
+    ports:
+      - "127.0.0.1:7733:7733"
+    volumes:
+      # Share the app's cache dir so cases and raw output persist on the host.
+      - .:/app
+    command: ["serve", "--host", "0.0.0.0", "--port", "7733"]
