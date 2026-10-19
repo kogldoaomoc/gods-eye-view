@@ -38,6 +38,20 @@ Install the research tools you want on your PATH (each is a separate project
 under its own licence): SpiderFoot, theHarvester, Sherlock, Maigret,
 PhoneInfoga. The bridge reports which ones it can find.
 
+theHarvester 5.x needs Python 3.14 and is not the `theHarvester` package on
+PyPI (that is a 0.0.1 placeholder). Install it from source into its own
+environment and point the bridge at it:
+
+```sh
+git clone --depth 1 https://github.com/laramies/theHarvester
+uv venv -p 3.14 ~/.venvs/theharvester
+VIRTUAL_ENV=~/.venvs/theharvester uv pip install ./theHarvester
+export CASEFILE_THEHARVESTER_BIN=~/.venvs/theharvester/bin/theHarvester
+```
+
+Verified against theHarvester 5.0.0: a keyless run on `example.com` returns
+about 500 hosts and 500 IPs in under ten seconds.
+
 ## Run
 
 ```sh

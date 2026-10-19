@@ -46,6 +46,20 @@ def test_theharvester_hosts_emails_and_shodan():
     assert geo_ips and geo_ips[0]["geo"]["country"] == "NL"
 
 
+def test_theharvester_v5_report_shape():
+    # Trimmed from a real theHarvester 5.0.0 run against example.com.
+    native = {
+        "cmd": "-d example.com -b crtsh,certspotter,hackertarget,rapiddns,otx,duckduckgo -f harvest",
+        "hosts": ["0.example.com", "09bc4233abde.example.com", "103-213-249-189.example.com"],
+        "ips": ["103.119.109.221", "103.136.70.104"],
+        "shodan": [],
+    }
+    result = TheHarvesterAdapter().normalize(native, "example.com", "domain")
+    assert len(_by_type(result, "host")) == 3
+    assert len(_by_type(result, "ip")) == 2
+    assert len(_by_type(result, "domain")) == 1
+
+
 def test_sherlock_parses_found_lines():
     native = "[+] GitHub: https://github.com/jdoe\n[*] Checking...\n[+] Reddit: https://reddit.com/u/jdoe\n"
     result = SherlockAdapter().normalize(native, "jdoe", "username")
