@@ -41,3 +41,8 @@
   2026-09-25. Each record names its XYZ tile and expected traffic eligibility.
   Modified, test-only OpenStreetMap data; same ODbL attribution and database
   share-alike terms as the OpenFreeMap fixtures above.
+- `import/*.geojson` — small hand-written GeoJSON files for the user-import
+  record model (`src/data/import/normalize.test.mjs`): a valid mixed-geometry
+  collection, an out-of-range coordinate, a three-feature file used with a
+  lowered feature cap, and HTML-like property strings that must stay text.
+  Never loaded at runtime.

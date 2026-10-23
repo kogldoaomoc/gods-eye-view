@@ -438,6 +438,26 @@ NOAA density imagery with the raw GLM product.
 
 ---
 
+## User-imported data
+
+DISPLAY ▸ **Import** shows files you choose. They are not data sources of this
+project and nothing about them is fetched, uploaded or proxied: parsing,
+rendering and (when **Keep on this device** is checked) storage all happen in
+your browser. Kept GeoJSON lives in this browser's IndexedDB
+(`gev-user-imports`) until you remove the file; clearing site data deletes it
+too.
+
+- **Your responsibility.** You decide what you import. Licensing, attribution
+  and any consent from people the data describes are yours to hold; the app does
+  not check, filter or coarsen the contents.
+- **Provenance.** Every kept record carries `provenance` (`file` name, `sha256`
+  of the original bytes, `importedAt`, optional `sourceNote`), an optional
+  `consent` note (`basis`: `owned`, `consented` or `open-license`, plus free
+  text) and `precision.meters` (`null` when unknown). Consent is metadata, never
+  a gate.
+- **Fidelity.** Original coordinates and all properties are kept as plain data.
+  Properties are never rendered as HTML, styles or links.
+
 ## In-app attribution
 
 The required Google Maps / Cesium credit renders on the on-globe credit line (`#cesium-credits`, bottom-left) and must stay visible — including in clean-view and recording modes (the whole line, logo + "Google Maps" + the "Data attribution" link, stays on screen; only the GEV panels/HUD fade). The layer-specific credits (adsb.lol, adsbdb, TeleGeography, OSM datacenters/dams/roads, NASA FIRMS, CelesTrak, USGS, City of Austin, Fintraffic, GBFS, Radio Browser, OpenSky, AISStream) are registered into the expandable **"Data attribution"** popover on that credit line via `viewer.creditDisplay.addStaticCredit(new Cesium.Credit(html, /* showOnScreen */ false))` — see `src/data/dataCredits.js`. When you add a new data source, add its license and attribution to this file **and** append an entry to `DATA_CREDITS` in `src/data/dataCredits.js` so it surfaces in the app.

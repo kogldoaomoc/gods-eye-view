@@ -1,3 +1,4 @@
+import { createGeoJsonPositionReader } from '../../data/import/geojsonGeometry.js';
 import { PACK_LIMITS } from './manifest.js';
 
 /** Decode a bounded geometry-only GeoJSON collection; properties never become HTML, styles or URLs. */
@@ -11,29 +12,11 @@ export function decodePackGeoJSON(bytes) {
     value.features.length > PACK_LIMITS.features
   )
     throw new Error('Expected a bounded FeatureCollection');
-  let positions = 0;
+  const { position, line } = createGeoJsonPositionReader({
+    maxPositions: PACK_LIMITS.positions,
+    fillAltitude: true,
+  });
   const ids = new Set();
-  function position(p) {
-    if (
-      !Array.isArray(p) ||
-      ![2, 3].includes(p.length) ||
-      p.some((v) => !Number.isFinite(v)) ||
-      Math.abs(p[0]) > 180 ||
-      Math.abs(p[1]) > 90 ||
-      (p.length === 3 && (p[2] < -12000 || p[2] > 1e9)) ||
-      ++positions > PACK_LIMITS.positions
-    )
-      throw new Error('Invalid geographic position');
-    return [p[0], p[1], p[2] ?? 0];
-  }
-  function line(points, ring = false) {
-    if (!Array.isArray(points) || points.length < (ring ? 4 : 2))
-      throw new Error('Invalid line');
-    const normalized = points.map(position);
-    if (ring && normalized[0].some((v, i) => v !== normalized.at(-1)[i]))
-      throw new Error('Unclosed ring');
-    return normalized;
-  }
   return value.features.map((feature) => {
     const id = feature?.id;
     if (
