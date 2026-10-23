@@ -222,8 +222,9 @@ def make_observation(
     confidence: float = 0.5,
     raw: str | None = None,
     at: str | None = None,
+    ownership: str | None = None,
 ) -> dict:
-    return {
+    observation = {
         "tool": tool,
         "toolVersion": tool_version,
         "query": query,
@@ -231,6 +232,9 @@ def make_observation(
         "confidence": max(0.0, min(1.0, float(confidence))),
         "raw": raw,
     }
+    if ownership:
+        observation["ownership"] = ownership
+    return observation
 
 
 def make_link(source_id: str, target_id: str, relation: str) -> dict:
@@ -243,6 +247,52 @@ def make_link(source_id: str, target_id: str, relation: str) -> dict:
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$")
 _PHONE_RE = re.compile(r"^\+?[\d\s().-]{7,20}$")
 _DOMAIN_RE = re.compile(r"^(?:https?://)?([a-z0-9-]+\.)+[a-z]{2,}(?:[/:].*)?$", re.I)
+# A dotted hostname. SpiderFoot quotes any target with no dot and then
+# classifies that quoted string as a username or a person's name.
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+    re.IGNORECASE,
+)
+_ASN_RE = re.compile(r"^AS[0-9]{1,10}$", re.IGNORECASE)
+_CERT_RE = re.compile(
+    r"^(?:(?:sha1|sha256|sha384|sha512|md5):)?(?:[0-9a-f]{32,128}|(?:[0-9a-f]{2}:){15,63}[0-9a-f]{2})$",
+    re.IGNORECASE,
+)
+INFRASTRUCTURE_TYPES = frozenset({"domain", "host", "ip", "asn", "cert"})
+
+
+def validate_infrastructure(selector_type: str, value: str) -> str:
+    """Accept an infrastructure selector only when it really is one.
+
+    Domains and hosts must be dotted hostnames. IPs must parse. ASNs look
+    like ``AS64500``. Certs are a hex hash or a colon-separated fingerprint.
+    Quotes, spaces, ``@`` and a leading ``+`` are rejected for all of these.
+    """
+    if selector_type not in INFRASTRUCTURE_TYPES:
+        raise SchemaError(f"not an infrastructure selector: {selector_type!r}")
+    if not isinstance(value, str):
+        raise SchemaError("selector is required")
+    text = value.strip()
+    if not text or text[0] == "+" or any(ch in text for ch in "\"'@ \t\r\n"):
+        raise SchemaError("selector does not match its type")
+    if selector_type in ("domain", "host"):
+        if not _HOSTNAME_RE.match(text):
+            raise SchemaError("domain and host selectors must be a hostname")
+        return text
+    if selector_type == "ip":
+        try:
+            if "/" in text:
+                return str(ipaddress.ip_network(text, strict=False))
+            return str(ipaddress.ip_address(text))
+        except ValueError as error:
+            raise SchemaError(f"not an IP address: {value!r}") from error
+    if selector_type == "asn":
+        if not _ASN_RE.match(text):
+            raise SchemaError("ASN selectors must look like AS64500")
+        return text.upper()
+    if not _CERT_RE.match(text):
+        raise SchemaError("cert selectors must be a fingerprint or hash")
+    return text.lower()
 
 
 def detect_selector(text: str) -> str:

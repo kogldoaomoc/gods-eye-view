@@ -89,7 +89,12 @@ python -m casefile export case_xxxxxxxxxxxx -o case.geojson --pretty
 | GET | `/api/cases/:id/entities` | Entities, filtered by `bbox`, `types`, `minConfidence`, `text`, `limit` |
 | GET | `/api/cases/:id/entities/:entityId` | One entity with observations and links |
 | POST | `/api/cases/:id/entities/:entityId/flags` | `{hidden, verified}` |
-| GET/POST | `/api/cases/:id/jobs` | List or start jobs `{selector, tools?, selectorType?}` |
+| GET/POST | `/api/cases/:id/jobs` | List or start jobs `{selector, tools?, selectorType?}`. A username, email, phone or person selector returns 403 without a consent that covers the tool |
+| POST | `/api/cases/:id/verifications` | Data package: one pending verification per identifier |
+| GET | `/api/cases/:id/verifications` | Checklist of those verifications |
+| POST | `/api/cases/:id/verifications/:id/confirm` | `{code}` or `{oauthCode, state}` |
+| GET | `/api/cases/:id/consents` | Anonymous consent records for the case |
+| POST | `/api/cases/:id/consents/:id/revoke` | Revoke one consent |
 | DELETE | `/api/jobs/:jobId` | Cancel a job |
 | GET | `/api/cases/:id/events` | Server-Sent Events: job progress and new entities |
 | GET | `/api/cases/:id/export.geojson` | Case as GeoJSON |
@@ -104,6 +109,29 @@ python -m casefile export case_xxxxxxxxxxxx -o case.geojson --pretty
 | `CASEFILE_GEOLITE2_DB` | Path to a local GeoLite2-City database for IP geolocation |
 | `CASEFILE_<TOOL>_BIN` | Override a tool's executable path |
 | `CASEFILE_THEHARVESTER_SOURCES` | theHarvester sources (default: keyless set) |
+| `CASEFILE_CONSENT_SALT` | HMAC key for identifier hashes. Required before a gated lookup or a verification |
+| `CASEFILE_SMTP_HOST` | SMTP host for email codes |
+| `CASEFILE_SMTP_PORT` | SMTP port (default `587`; `465` uses implicit TLS) |
+| `CASEFILE_SMTP_USER` | SMTP username |
+| `CASEFILE_SMTP_PASSWORD` | SMTP password. Never logged or returned |
+| `CASEFILE_SMTP_FROM` | From address for email codes |
+| `CASEFILE_SMS_PROVIDER` | SMS provider id. `console` (the default) is the dev and test implementation |
+| `CASEFILE_OAUTH_PROVIDERS` | Comma-separated OAuth provider ids, for example `github` |
+| `CASEFILE_OAUTH_REDIRECT_URI` | Redirect URI sent to those providers |
+| `CASEFILE_OAUTH_<NAME>_CLIENT_ID` | OAuth client id (`<NAME>` is the provider id in upper case) |
+| `CASEFILE_OAUTH_<NAME>_CLIENT_SECRET` | OAuth client secret. Never logged or placed on the authorization URL |
+| `CASEFILE_OAUTH_<NAME>_AUTHORIZE_URL` | Authorization endpoint |
+| `CASEFILE_OAUTH_<NAME>_TOKEN_URL` | Token endpoint |
+| `CASEFILE_OAUTH_<NAME>_USERINFO_URL` | Userinfo endpoint |
+| `CASEFILE_OAUTH_<NAME>_USER_FIELD` | JSON field holding the username (default `login`) |
+
+A username, email, phone or person selector runs only after a verified consent
+that covers the requested tool. The server classifies the selector: a declared
+domain, host, IP, ASN or cert is accepted only when the string is one, and a
+detected username, email, phone or person is gated anyway. Organization is
+not a lookup target. The flow and the consent and audit records are described in
+[`../docs/CASEFILE.md`](../docs/CASEFILE.md). Optional header
+`X-Casefile-Operator` is stored on the audit row when it is a short opaque id.
 
 ## Tests
 

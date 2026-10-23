@@ -9,6 +9,7 @@ runs so a scan cannot hammer an upstream service. Results are cached by
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -17,6 +18,7 @@ from dataclasses import dataclass, field
 
 from . import adapters, schema
 from .adapters.base import AdapterError, Cancelled, RateLimited, RunContext
+from .consent import GATED_SELECTOR_TYPES, ConsentRequired, Decision, normalize_actor
 from .geo import GeoResolver
 from .store import CaseRegistry
 
@@ -40,6 +42,7 @@ class Job:
     started: str | None = None
     finished: str | None = None
     found: int = 0
+    actor: str = "local"
     cancel: threading.Event = field(default_factory=threading.Event)
 
     def snapshot(self) -> dict:
@@ -66,8 +69,10 @@ class JobRunner:
         resolver: GeoResolver | None = None,
         workers: int = 2,
         on_event=None,
+        consent=None,
     ):
         self.registry = registry
+        self.consent = consent
         self.resolver = resolver or GeoResolver()
         self._on_event = on_event or (lambda event: None)
         self._jobs: dict[str, Job] = {}
@@ -81,16 +86,71 @@ class JobRunner:
         self._pump.start()
 
     # -- submission ---------------------------------------------------------
-    def submit(self, case_id: str, selector: str, tools: list[str] | None = None, *, selector_type: str | None = None):
+    def submit(
+        self,
+        case_id: str,
+        selector: str,
+        tools: list[str] | None = None,
+        *,
+        selector_type: str | None = None,
+        actor: str | None = None,
+    ):
         self.registry.store(case_id)  # raises KeyError for an unknown case
-        stype = selector_type or schema.detect_selector(selector)
+        stype = prepare_selector(selector, selector_type)
         chosen = tools or adapters.default_tools(stype)
-        created = []
+        actor = normalize_actor(actor)
+        planned = []
+        refused = []
         for name in chosen:
             adapter = adapters.REGISTRY.get(name)
             if not adapter or stype not in adapter.accepts:
                 continue
-            job = Job(id="job_" + uuid.uuid4().hex[:12], case_id=case_id, tool=name, selector=selector, selector_type=stype)
+            # Any tool on a person-identifier selector is gated, including ones
+            # added later. Domain, host, IP, ASN, cert and the other
+            # infrastructure types are not in GATED_SELECTOR_TYPES.
+            if stype in GATED_SELECTOR_TYPES:
+                if self.consent is None:
+                    refused.append(Decision(False, name, "verified consent is not configured", None))
+                    continue
+                decision = self.consent.evaluate(case_id, name, selector, stype)
+                if not decision.ok:
+                    refused.append(decision)
+                    continue
+                planned.append((name, decision))
+            else:
+                planned.append((name, None))
+        if refused:
+            if self.consent is not None:
+                for item in refused:
+                    self.consent.audit(
+                        case_id,
+                        item.consent_id,
+                        item.tool,
+                        "refused",
+                        selector_hash=item.selector_hash,
+                        actor=actor,
+                    )
+            message = "; ".join(f"{item.tool}: {item.reason}" for item in refused)
+            raise ConsentRequired(message, refused)
+        created = []
+        for name, decision in planned:
+            if decision is not None and self.consent is not None:
+                self.consent.audit(
+                    case_id,
+                    decision.consent_id,
+                    name,
+                    "allowed",
+                    selector_hash=decision.selector_hash,
+                    actor=actor,
+                )
+            job = Job(
+                id="job_" + uuid.uuid4().hex[:12],
+                case_id=case_id,
+                tool=name,
+                selector=selector,
+                selector_type=stype,
+                actor=actor,
+            )
             with self._lock:
                 self._jobs[job.id] = job
                 self._queue.append(job.id)
@@ -147,6 +207,8 @@ class JobRunner:
                 self._finish(job, DONE)
             except Cancelled:
                 self._finish(job, CANCELLED)
+            except ConsentRequired as error:
+                self._finish(job, FAILED, str(error))
             except RateLimited as error:
                 self._finish(job, FAILED, f"rate limited: {error}")
             except AdapterError as error:
@@ -157,6 +219,23 @@ class JobRunner:
             self._slots.release()
 
     def _execute(self, job: Job) -> dict:
+        # Classify again at start. A queued job must not keep a caller-supplied
+        # type that the selector string does not actually have.
+        try:
+            job.selector_type = prepare_selector(job.selector, job.selector_type)
+        except ValueError as error:
+            raise AdapterError(str(error)) from None
+        platform = None
+        if job.selector_type in GATED_SELECTOR_TYPES:
+            if self.consent is None:
+                raise ConsentRequired("verified consent is not configured")
+            # Checked again at start so a consent revoked while queued still fails,
+            # and a cached result cannot skip the gate. The selector type is what
+            # gates the lookup, so a new adapter cannot bypass it.
+            decision = self.consent.authorize(
+                job.case_id, job.tool, job.selector, job.selector_type, actor=job.actor
+            )
+            platform = decision.platform
         adapter = adapters.get(job.tool)
         normalized_selector = _safe_normalize(job.selector_type, job.selector)
         cache_key = (job.tool, adapter.version(), job.selector_type, normalized_selector)
@@ -167,12 +246,14 @@ class JobRunner:
         else:
             ctx = RunContext(env=None, timeout_s=adapter.timeout_s, cancel_event=job.cancel)
             try:
-                native = adapter.run(job.selector, job.selector_type, ctx)
+                native = adapter.run(normalized_selector, job.selector_type, ctx)
             finally:
                 ctx.close()
             raw_ref = self._archive(job, native)
             self._cache[cache_key] = (time.time(), {"native": native, "raw": raw_ref})
         result = adapter.normalize(native, job.selector, job.selector_type)
+        if job.tool in ("sherlock", "maigret") and platform:
+            _mark_ownership(result.entities, platform)
         entities = [self.resolver.resolve(entity) for entity in result.entities]
         observation = schema.make_observation(
             job.tool, query=job.selector, tool_version=adapter.version(), confidence=adapter.confidence, raw=raw_ref, at=observation_at
@@ -221,6 +302,52 @@ class JobRunner:
             self._on_event(event)
         except Exception:
             pass
+
+
+def prepare_selector(selector: str, declared: str | None) -> str:
+    """Return the type this selector will be scanned as.
+
+    The declared type is checked, not trusted. Organization is not a lookup
+    target. A string ``detect_selector`` calls a username, email, phone or
+    person keeps that type even when the caller said domain, host or similar,
+    unless the declared infrastructure type actually validates.
+    """
+    if not isinstance(selector, str) or not selector.strip():
+        raise ValueError("selector is required")
+    selector = selector.strip()
+    if declared == "organization":
+        raise ValueError("organization is not a lookup target")
+    try:
+        detected = schema.detect_selector(selector)
+    except schema.SchemaError as error:
+        raise ValueError(str(error)) from None
+    if declared in (None, ""):
+        declared = detected
+    if not isinstance(declared, str):
+        raise ValueError("selectorType is not valid")
+    if declared in schema.INFRASTRUCTURE_TYPES:
+        try:
+            schema.validate_infrastructure(declared, selector)
+        except schema.SchemaError:
+            if detected in GATED_SELECTOR_TYPES:
+                return detected
+            raise ValueError("selector does not match its type") from None
+        return declared
+    if detected in GATED_SELECTOR_TYPES:
+        return detected
+    return declared
+
+
+def _mark_ownership(entities: list[dict], platform: str) -> None:
+    """A username proof covers one platform. Other sites stay unverified."""
+    verified_key = re.sub(r"[^a-z0-9]", "", platform.casefold())
+    for entity in entities:
+        attrs = entity.get("attrs") if isinstance(entity.get("attrs"), dict) else {}
+        site_key = re.sub(r"[^a-z0-9]", "", str(attrs.get("site") or "").casefold())
+        if entity.get("type") == "username" or (verified_key and site_key == verified_key):
+            entity["_ownership"] = "verified"
+        else:
+            entity["_ownership"] = "unverified"
 
 
 def _safe_normalize(selector_type: str, selector: str) -> str:

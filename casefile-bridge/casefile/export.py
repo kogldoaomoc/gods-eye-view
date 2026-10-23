@@ -34,7 +34,9 @@ def entity_to_feature(entity: dict) -> dict | None:
     geo = entity.get("geo")
     if not geo or "lat" not in geo:
         return None
-    tools = sorted({obs["tool"] for obs in entity.get("observations", [])})
+    observations = entity.get("observations", [])
+    tools = sorted({obs["tool"] for obs in observations})
+    ownership = _ownership(observations)
     properties = {
         "id": entity["id"],
         "type": entity["type"],
@@ -48,6 +50,7 @@ def entity_to_feature(entity: dict) -> dict | None:
         "firstSeen": entity.get("firstSeen"),
         "lastSeen": entity.get("lastSeen"),
         "verified": entity.get("verified"),
+        "ownership": ownership,
         "icon": _ICONS.get(entity["type"], "pin"),
     }
     return {
@@ -55,6 +58,16 @@ def entity_to_feature(entity: dict) -> dict | None:
         "geometry": {"type": "Point", "coordinates": [geo["lon"], geo["lat"]]},
         "properties": {key: val for key, val in properties.items() if val is not None},
     }
+
+
+def _ownership(observations: list[dict]) -> str | None:
+    """Cross-platform hits stay unverified when any observation says so."""
+    values = [obs.get("ownership") for obs in observations if obs.get("ownership")]
+    if "unverified" in values:
+        return "unverified"
+    if "verified" in values:
+        return "verified"
+    return None
 
 
 def case_to_geojson(store: CaseStore, *, include_hidden: bool = False, min_confidence: float = 0.0) -> dict:

@@ -171,7 +171,13 @@ Responsibilities:
   `geo` for bounding-box queries. Raw outputs are kept as files beside it,
   referenced from observations.
 - **Secrets.** Any API keys a tool needs live in the bridge's environment, never in the
-  browser and never in case files.
+  browser and never in case files. SMTP, SMS and OAuth secrets used for
+  verified consent are the same: environment only, never in a response or a log.
+- **Verified consent.** Any tool aimed at a username, email, phone or person
+  name waits for a verified consent that covers that tool. Domain, host, IP,
+  ASN and cert lookups do not. The check is in the job queue and the HTTP API,
+  and the adapter modules are unchanged. The flow and the record layout are in
+  [Verified consent](#verified-consent).
 
 ### 2. GEV server provider: `server/providers/casefile/`
 
@@ -294,11 +300,14 @@ Which tools run by default for each selector type. Users can tick others.
 | Phone | PhoneInfoga | SpiderFoot | `country` or `region` outline |
 | Domain | theHarvester, SpiderFoot | Recon-ng, sn0int | Hosts and IPs, via IP geolocation |
 | IP or netblock | SpiderFoot | Recon-ng | GeoLite2, `city` precision |
-| Organization or address | SpiderFoot | | Geocoded addresses |
+| Address | | | Not sent to a tool |
 
-SpiderFoot overlaps most of the others. It is used for broad scans; the
-dedicated tools run directly when the user wants one fast answer. The
-entity hash removes duplicates between them.
+Organization is not a lookup target. A free-text person name has no default
+route. Username, email and phone defaults do not run until a consent record
+covers the tool. Domain, host, IP, ASN and cert stay ungated when the string
+really is that type. SpiderFoot overlaps most of the others. It is used
+for broad scans; the dedicated tools run directly when the user wants one fast
+answer. The entity hash removes duplicates between them.
 
 ## Performance budget
 
@@ -339,6 +348,140 @@ entity hash removes duplicates between them.
 - Case data is excluded from share links, layer-state persistence and logs.
 - People-search, breach-lookup and account-profiling tools are out of
   scope (see above).
+
+## Verified consent
+
+Any tool may run on a username, email, phone or person name only after the
+person who controls that identifier has proved it, and only when the consent
+names that tool. The gate is the selector type, checked when the job is
+accepted and again when it starts, so a later adapter cannot skip it.
+SpiderFoot on a domain, host or IP, theHarvester on a domain, and ASN or cert
+lookups do not ask for consent. A free-text person name is not a default
+lookup and is not a verifiable identifier: an explicit person job is refused
+unless a consent already covers that exact name and tool. A client can stay
+anonymous: the record has no name and no contact field.
+
+The office flow is one data package. The client hands over a batch of their
+own identifiers. The case opens one verification per identifier and sends
+every code at the same time. The client confirms each code on their own
+phone, and staff type the codes in. Confirming one identifier does not
+verify any other. The method is chosen per identifier.
+
+### Proof of control
+
+The challenge goes to the identifier itself. The bridge will not deliver it
+to any other address or number, and it will not accept a staff attestation
+or one alternate contact as proof for several identifiers.
+
+| Identifier | Method | Proof |
+| --- | --- | --- |
+| Email | `email_code` | A one-time code sent to that address over SMTP |
+| Phone | `sms_code` | An SMS code sent to that number |
+| Username | `profile_code` | The client posts a generated code on that public profile. The bridge fetches GitHub or Reddit and checks that the code is there. Redirects stay on that host and do not drop from https to http. GitLab and X/Twitter do not expose profile text to this fetch; use OAuth for those |
+| Username | `oauth` | The client signs in with an OAuth provider configured on the server, where that is practical |
+
+OAuth is a pluggable `OAuthProvider`. No provider is enabled until the server
+environment names one. SMS is a pluggable sender with a console implementation
+for local development and tests. Codes are single-use, expire after 15
+minutes, and are compared in constant time. Sends are limited to five per
+identifier per hour, 50 per case per hour and 200 per hour across the bridge,
+and a package holds at most 50 identifiers. A confirm has five attempts. The
+attempt check and the increment are one update, so parallel confirms cannot
+pass that limit. Emails are normalized with NFKC and then casefold, so
+`ﬁle@example.com` and `file@example.com` are one identifier. Usernames are
+not. NFKC maps the ligature `ﬁ` and fullwidth letters onto ASCII, and
+casefold maps `ß` to `ss`, so hashing either form would let a consent for
+`strasse` authorize `straße`, `ﬁona` or `ｆｉｏｎａ`. Non-ASCII usernames are
+refused. ASCII usernames still casefold, so `JDoe` and `jdoe` are one
+identifier.
+
+`POST /api/cases/:id/verifications` with `{identifiers: [{type, value, method, tools?, platform?}]}`
+creates the batch and returns a checklist. Each entry is `pending`,
+`verified`, `expired` or `locked`. Email and SMS codes are not in that
+response; the profile code and the OAuth URL are, because the client needs
+them. `POST /api/cases/:id/verifications/:id/confirm` completes one row.
+`GET /api/cases/:id/consents` lists consent records.
+`POST /api/cases/:id/consents/:id/revoke` sets `revoked_at`.
+
+### Consent record
+
+One row per verified identifier, in the bridge's `consent.sqlite`. The raw
+identifier is not stored. A pending verification keeps the raw value only
+until the code is consumed or the code or the record expires, because a
+profile fetch has to know which username to read. After that, a sweeper that
+runs at startup and about once a minute leaves the hash and a masked display
+form (`a•••@domain`, a phone prefix and last two digits, or a shortened
+username). The checklist returns that mask as `identifierMasked` and never
+the raw value. The console SMS log uses the same phone mask. The verification
+record expires on the same 24-hour lifetime as the consent; the code itself
+still expires after 15 minutes (`code_expires_at`).
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `cns_` and 12 hex characters |
+| `case_id` | Case the consent belongs to |
+| `identifier_hash` | HMAC-SHA256 of the type and the identifier, keyed with `CASEFILE_CONSENT_SALT`. Emails are NFKC-normalized and casefolded. Usernames are ASCII, then casefolded, and are not NFKC-normalized |
+| `identifier_type` | `email`, `phone` or `username` |
+| `method` | `email_code`, `sms_code`, `profile_code` or `oauth` |
+| `platform` | Username platform the proof came from, such as `github`. Null for email and phone |
+| `verified_at` | When the challenge was accepted |
+| `tools` | Registered adapters this consent allows, for example `sherlock`, `maigret`, `phoneinfoga`, `theharvester`, `spiderfoot` |
+| `expires_at` | Consent lifetime, 24 hours from verification |
+| `revoked_at` | Null while the consent is live |
+
+A lookup is allowed only when a row for that case and identifier hash is
+verified, `expires_at` is still in the future, `revoked_at` is null, and the
+tool is in `tools`. Normalization matches the entity schema, so
+`Owner@Example.com` and `owner@example.com` are one identifier.
+
+A username proof is for one platform. Sherlock and Maigret observations store
+`ownership`: the username itself and accounts on the verified platform are
+`verified`, and hits on every other platform are `unverified`. The GeoJSON
+export copies that onto the feature, and a mixed entity stays `unverified`.
+
+### Audit log
+
+Every gated lookup writes one append-only row, allowed or refused. The job
+is checked when it is accepted and again when it starts, so a consent
+revoked while the job is queued still fails and is audited. Updates and
+deletes on this table are rejected.
+
+| Field | Meaning |
+| --- | --- |
+| `consent_id` | Consent row used for the decision, or null when none applies |
+| `tool` | Adapter the lookup asked for |
+| `selector_hash` | The same identifier HMAC the consent uses, never the raw selector |
+| `actor` | Opaque operator id from `X-Casefile-Operator` (`[A-Za-z0-9_.:-]{1,64}`), otherwise `local`. Client names are not stored |
+| `at` | Time of the attempt |
+| `result` | `allowed` or `refused` |
+
+Rows are inserted with a plain `INSERT`. A `BEFORE INSERT` trigger rejects a row whose id already exists, so `INSERT OR REPLACE` cannot rewrite the log from any connection, including one that has not turned recursive triggers on. Updates and deletes are rejected too. The case id is stored beside those fields so the shared log can be filtered. The selector is not stored.
+
+### Enforcement
+
+The HTTP server and the job runner both classify the selector, then refuse a
+job whose type is `username`, `email`, `phone` or `person` when that tool has
+no valid consent. The declared type is checked, not trusted. A domain or host
+must be a dotted hostname, an IP must parse, an ASN must look like `AS64500`,
+and a cert must be a fingerprint or a hash. Quotes, spaces, `@` and a leading
+`+` fail those checks. When detection returns a username, email, phone or
+person, that type is what the gate uses, even if the caller said domain or
+host. Organization is rejected and is not scanned. Both checks run when the
+job is accepted and again when it starts.
+
+The response is HTTP 403 and names the tool and the reason (`no verified
+consent`, `a person name is not a verifiable identifier`, `consent has
+expired`, `consent has been revoked`, `consent does not cover <tool>`). No
+job from that request is queued, and the tool is not started. A domain, host,
+IP, ASN or cert that passes the check is accepted without a consent record.
+A detected person name starts no default job.
+
+SpiderFoot has no target-type flag and guesses from the `-s` string, quoting
+a value with a space or with no dot. The bridge passes the decided type in
+`SPIDERFOOT_TARGET_TYPE` and does not start the tool when that guess would
+be a different type. theHarvester is only given a hostname: an email uses
+the domain part, and an `@`, quote, space or leading `+` is not passed as
+`-d`.
 
 ## Implementation phases
 
