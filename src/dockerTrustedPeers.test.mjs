@@ -124,6 +124,34 @@ test('the real Docker entry point warns about CIDR and * and does not log them a
   assert.equal(prefix.gateway.status, 403);
   assert.match(prefix.stderr, /172\.29\.73\.0\/24/);
   assert.doesNotMatch(prefix.output, /trusted peers:/);
+
+  const others = launchWithPolicy(
+    'gateway.local, [::1], fe80::1%eth0, 10.9.8.7, none',
+  );
+  assert.equal(others.trustedAtImport, '10.9.8.7');
+  assert.equal(others.gateway.status, 403);
+  assert.match(
+    others.stderr,
+    /addresses \(gateway\.local, \[::1\], fe80::1%eth0, none\)/,
+  );
+  const logged = others.output
+    .split('\n')
+    .find((line) => line.includes('trusted peers:'));
+  assert.equal(
+    logged,
+    '[Docker] Provider Settings trusted peers: 10.9.8.7 (GEV_KEY_SETUP_TRUSTED_PEERS).',
+  );
+});
+
+test('the logged trusted-peer list is trimmed and joined even when every entry is an address', () => {
+  const result = launchWithPolicy(' 10.1.2.3 ,  192.168.0.1 ');
+  assert.equal(result.trustedAtImport, '10.1.2.3, 192.168.0.1');
+  assert.equal(result.gateway.ok, true);
+  assert.match(
+    result.output,
+    /trusted peers: 10\.1\.2\.3, 192\.168\.0\.1 \(GEV_KEY_SETUP_TRUSTED_PEERS\)\./,
+  );
+  assert.doesNotMatch(result.stderr, /Ignoring GEV_KEY_SETUP_TRUSTED_PEERS/);
 });
 
 test('unset, blank and explicit peers retain gateway admission without weakening Origin checks', () => {
