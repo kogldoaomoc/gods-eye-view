@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from . import adapters, schema
 from .adapters.base import AdapterError, Cancelled, RateLimited, RunContext
+from .consent import GATED_TOOLS, ConsentRequired, Decision
 from .geo import GeoResolver
 from .store import CaseRegistry
 
@@ -66,8 +67,10 @@ class JobRunner:
         resolver: GeoResolver | None = None,
         workers: int = 2,
         on_event=None,
+        consent=None,
     ):
         self.registry = registry
+        self.consent = consent
         self.resolver = resolver or GeoResolver()
         self._on_event = on_event or (lambda event: None)
         self._jobs: dict[str, Job] = {}
@@ -85,11 +88,33 @@ class JobRunner:
         self.registry.store(case_id)  # raises KeyError for an unknown case
         stype = selector_type or schema.detect_selector(selector)
         chosen = tools or adapters.default_tools(stype)
-        created = []
+        planned = []
+        refused = []
         for name in chosen:
             adapter = adapters.REGISTRY.get(name)
             if not adapter or stype not in adapter.accepts:
                 continue
+            if name in GATED_TOOLS:
+                if self.consent is None:
+                    refused.append(Decision(False, name, "verified consent is not configured", None))
+                    continue
+                decision = self.consent.evaluate(case_id, name, selector, stype)
+                if not decision.ok:
+                    refused.append(decision)
+                    continue
+                planned.append((name, decision.consent_id))
+            else:
+                planned.append((name, None))
+        if refused:
+            if self.consent is not None:
+                for item in refused:
+                    self.consent.audit(case_id, item.consent_id, item.tool, "refused")
+            message = "; ".join(f"{item.tool}: {item.reason}" for item in refused)
+            raise ConsentRequired(message, refused)
+        created = []
+        for name, consent_id in planned:
+            if consent_id is not None and self.consent is not None:
+                self.consent.audit(case_id, consent_id, name, "allowed")
             job = Job(id="job_" + uuid.uuid4().hex[:12], case_id=case_id, tool=name, selector=selector, selector_type=stype)
             with self._lock:
                 self._jobs[job.id] = job
@@ -147,6 +172,8 @@ class JobRunner:
                 self._finish(job, DONE)
             except Cancelled:
                 self._finish(job, CANCELLED)
+            except ConsentRequired as error:
+                self._finish(job, FAILED, str(error))
             except RateLimited as error:
                 self._finish(job, FAILED, f"rate limited: {error}")
             except AdapterError as error:
@@ -157,6 +184,12 @@ class JobRunner:
             self._slots.release()
 
     def _execute(self, job: Job) -> dict:
+        if job.tool in GATED_TOOLS:
+            if self.consent is None:
+                raise ConsentRequired("verified consent is not configured")
+            # Checked again at start so a consent revoked while queued still fails,
+            # and a cached result cannot skip the gate.
+            self.consent.authorize(job.case_id, job.tool, job.selector, job.selector_type)
         adapter = adapters.get(job.tool)
         normalized_selector = _safe_normalize(job.selector_type, job.selector)
         cache_key = (job.tool, adapter.version(), job.selector_type, normalized_selector)

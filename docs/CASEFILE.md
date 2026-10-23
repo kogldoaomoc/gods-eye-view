@@ -171,7 +171,13 @@ Responsibilities:
   `geo` for bounding-box queries. Raw outputs are kept as files beside it,
   referenced from observations.
 - **Secrets.** Any API keys a tool needs live in the bridge's environment, never in the
-  browser and never in case files.
+  browser and never in case files. SMTP, SMS and OAuth secrets used for
+  verified consent are the same: environment only, never in a response or a log.
+- **Verified consent.** Sherlock, Maigret and PhoneInfoga do not run on an
+  email, phone or username until that identifier has a verified consent
+  record. The check is in the job queue and the HTTP API, and the adapter
+  modules are unchanged. The flow and the record layout are in
+  [Verified consent](#verified-consent).
 
 ### 2. GEV server provider: `server/providers/casefile/`
 
@@ -339,6 +345,98 @@ entity hash removes duplicates between them.
 - Case data is excluded from share links, layer-state persistence and logs.
 - People-search, breach-lookup and account-profiling tools are out of
   scope (see above).
+
+## Verified consent
+
+Sherlock, Maigret and PhoneInfoga may run on an email address, a phone number
+or a username only after the person who controls that identifier has proved
+it. SpiderFoot, and theHarvester on a domain, host or IP, are unchanged and
+do not ask for consent. A client can stay anonymous: the record has no name
+and no contact field.
+
+The office flow is one data package. The client hands over a batch of their
+own identifiers. The case opens one verification per identifier and sends
+every code at the same time. The client confirms each code on their own
+phone, and staff type the codes in. Confirming one identifier does not
+verify any other. The method is chosen per identifier.
+
+### Proof of control
+
+The challenge goes to the identifier itself. The bridge will not deliver it
+to any other address or number, and it will not accept a staff attestation
+or one alternate contact as proof for several identifiers.
+
+| Identifier | Method | Proof |
+| --- | --- | --- |
+| Email | `email_code` | A one-time code sent to that address over SMTP |
+| Phone | `sms_code` | An SMS code sent to that number |
+| Username | `profile_code` | The client posts a generated code on that public profile. The bridge fetches the profile and checks that the code is there. This method is always available |
+| Username | `oauth` | The client signs in with an OAuth provider configured on the server, where that is practical |
+
+OAuth is a pluggable `OAuthProvider`. No provider is enabled until the server
+environment names one. Profile-code does not depend on it. SMS is a pluggable
+sender with a console implementation for local development and tests. Codes
+are single-use, expire after 15 minutes, are rate-limited (five sends per
+identifier per hour, five confirm attempts), and are compared in constant time.
+
+`POST /api/cases/:id/verifications` with `{identifiers: [{type, value, method, tools?, platform?}]}`
+creates the batch and returns a checklist. Each entry is `pending`,
+`verified`, `expired` or `locked`. Email and SMS codes are not in that
+response; the profile code and the OAuth URL are, because the client needs
+them. `POST /api/cases/:id/verifications/:id/confirm` completes one row.
+`GET /api/cases/:id/consents` lists consent records.
+`POST /api/cases/:id/consents/:id/revoke` sets `revoked_at`.
+
+### Consent record
+
+One row per verified identifier, in the bridge's `consent.sqlite`. The raw
+identifier is not stored. The pending verification row keeps the identifier
+the client just handed over so the checklist can be matched to the package
+and a profile fetch knows which username to read. That value is not copied
+onto the consent record.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `cns_` and 12 hex characters |
+| `case_id` | Case the consent belongs to |
+| `identifier_hash` | HMAC-SHA256 of the type and the normalized identifier, keyed with `CASEFILE_CONSENT_SALT`. Usernames are folded before hashing |
+| `identifier_type` | `email`, `phone` or `username` |
+| `method` | `email_code`, `sms_code`, `profile_code` or `oauth` |
+| `verified_at` | When the challenge was accepted |
+| `tools` | Subset of `sherlock`, `maigret`, `phoneinfoga` that this consent allows |
+| `expires_at` | Consent lifetime, 24 hours from verification |
+| `revoked_at` | Null while the consent is live |
+
+A lookup is allowed only when a row for that case and identifier hash is
+verified, `expires_at` is still in the future, `revoked_at` is null, and the
+tool is in `tools`. Normalization matches the entity schema, so
+`Owner@Example.com` and `owner@example.com` are one identifier.
+
+### Audit log
+
+Every gated lookup writes one append-only row, allowed or refused. The job
+is checked when it is accepted and again when it starts, so a consent
+revoked while the job is queued still fails and is audited. Updates and
+deletes on this table are rejected.
+
+| Field | Meaning |
+| --- | --- |
+| `consent_id` | Consent row used for the decision, or null when none applies |
+| `tool` | `sherlock`, `maigret` or `phoneinfoga` |
+| `at` | Time of the attempt |
+| `result` | `allowed` or `refused` |
+
+The case id is stored beside those fields so the shared log can be filtered.
+The selector is not stored.
+
+### Enforcement
+
+The HTTP server and the job runner both refuse a Sherlock, Maigret or
+PhoneInfoga job that lacks a valid consent. The response is HTTP 403 and
+names the tool and the reason (`no verified consent`, `consent has expired`,
+`consent has been revoked`, `consent does not cover <tool>`). No job from
+that request is queued, and the tool is not started. A request that only
+names SpiderFoot or theHarvester is accepted as before.
 
 ## Implementation phases
 

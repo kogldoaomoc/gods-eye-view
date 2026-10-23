@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__, adapters, schema
+from .consent import ConsentError, ConsentRequired, open_consent
 from .export import case_to_geojson
 from .jobs import JobRunner
 from .store import CaseRegistry
@@ -59,20 +60,24 @@ class EventBroker:
 class Bridge:
     """Holds the registry, job runner and event broker for the handlers."""
 
-    def __init__(self, store_root: str, *, token: str | None = None, workers: int = 2):
+    def __init__(self, store_root: str, *, token: str | None = None, workers: int = 2, consent=None):
         self.registry = CaseRegistry(store_root)
         self.broker = EventBroker()
-        self.runner = JobRunner(self.registry, workers=workers, on_event=self.broker.publish)
+        self.consent = consent or open_consent(store_root)
+        self.runner = JobRunner(self.registry, workers=workers, on_event=self.broker.publish, consent=self.consent)
         self.token = token
 
     def close(self) -> None:
         self.runner.stop()
+        self.consent.close()
         self.registry.close()
 
 
 _CASE = r"(?P<case>case_[a-z0-9]{12})"
 _ENTITY = r"(?P<entity>ent_[a-z0-9]{24})"
 _JOB = r"(?P<job>job_[a-z0-9]{12})"
+_VER = r"(?P<ver>ver_[a-z0-9]{12})"
+_CONSENT = r"(?P<consent>cns_[a-z0-9]{12})"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -130,6 +135,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(401, {"error": "bad token"})
         try:
             self._route(method, path, query)
+        except ConsentRequired as error:
+            self._send(403, {"error": str(error), "refused": [
+                {"tool": item.tool, "error": item.reason, "consentId": item.consent_id}
+                for item in error.refused
+            ]})
+        except ConsentError as error:
+            self._send(error.status, {"error": str(error)})
         except KeyError:
             self._send(404, {"error": "case or entity not found"})
         except ValueError as error:
@@ -184,6 +196,38 @@ class Handler(BaseHTTPRequestHandler):
                     case_id, selector, body.get("tools"), selector_type=body.get("selectorType")
                 )
                 return self._send(202, {"jobs": jobs})
+        match = re.fullmatch(rf"/api/cases/{_CASE}/verifications", path)
+        if match:
+            case_id = match["case"]
+            bridge.registry.store(case_id)
+            if method == "GET":
+                return self._send(200, {"verifications": bridge.consent.list_verifications(case_id)})
+            if method == "POST":
+                created = bridge.consent.create_package(case_id, self._read_json())
+                return self._send(201, {"verifications": created})
+        match = re.fullmatch(rf"/api/cases/{_CASE}/verifications/{_VER}/confirm", path)
+        if match and method == "POST":
+            case_id = match["case"]
+            bridge.registry.store(case_id)
+            body = self._read_json()
+            consent = bridge.consent.confirm(
+                case_id,
+                match["ver"],
+                code=body.get("code"),
+                oauth_code=body.get("oauthCode"),
+                state=body.get("state"),
+            )
+            return self._send(200, {"consent": consent})
+        match = re.fullmatch(rf"/api/cases/{_CASE}/consents", path)
+        if match and method == "GET":
+            case_id = match["case"]
+            bridge.registry.store(case_id)
+            return self._send(200, {"consents": bridge.consent.list_consents(case_id)})
+        match = re.fullmatch(rf"/api/cases/{_CASE}/consents/{_CONSENT}/revoke", path)
+        if match and method == "POST":
+            case_id = match["case"]
+            bridge.registry.store(case_id)
+            return self._send(200, {"consent": bridge.consent.revoke(case_id, match["consent"])})
         match = re.fullmatch(rf"/api/jobs/{_JOB}", path)
         if match and method == "DELETE":
             return self._send(200, {"cancelled": bridge.runner.cancel(match["job"])})
@@ -249,8 +293,8 @@ def _csv(value):
     return [item.strip() for item in value.split(",") if item.strip()] if value else []
 
 
-def make_server(store_root: str, *, host: str = "127.0.0.1", port: int = 7733, token: str | None = None, workers: int = 2):
-    bridge = Bridge(store_root, token=token, workers=workers)
+def make_server(store_root: str, *, host: str = "127.0.0.1", port: int = 7733, token: str | None = None, workers: int = 2, consent=None):
+    bridge = Bridge(store_root, token=token, workers=workers, consent=consent)
     handler = type("BoundHandler", (Handler,), {"bridge": bridge})
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.bridge = bridge
