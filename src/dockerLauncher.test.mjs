@@ -5,6 +5,7 @@ import {
   defaultGatewayFromRouteTable,
   unwritableRootWarning,
   resolveTrustedPeers,
+  unmatchedTrustedPeerWarning,
 } from '../scripts/docker-start.mjs';
 
 // The shape of /proc/net/route inside a bridge-networked container:
@@ -54,6 +55,97 @@ test('an operator list wins, and no gateway trusts nothing', () => {
     'a blank override falls through to the gateway',
   );
   assert.equal(resolveTrustedPeers({ env: {}, routeTable: '' }), '', 'loopback-only when there is no gateway');
+});
+
+test('a CIDR range or * is not trusted and is named in a warning', () => {
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: '*' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '',
+    'a wildcard does not fall through to the gateway',
+  );
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: '172.29.73.0/24' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '',
+    'a prefix does not fall through to the gateway',
+  );
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: ' 10.9.8.7, 172.29.73.0/24, * ' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '10.9.8.7',
+    'exact addresses in the same list stay',
+  );
+  assert.equal(
+    unmatchedTrustedPeerWarning('10.9.8.7'),
+    null,
+    'an exact address needs no warning',
+  );
+  assert.equal(unmatchedTrustedPeerWarning('none'), null, 'none is a real setting, not a bad entry');
+  const warning = unmatchedTrustedPeerWarning(' 10.9.8.7, 172.29.73.0/24, * ');
+  assert.match(warning, /172\.29\.73\.0\/24/);
+  assert.match(warning, /\*/);
+  assert.match(warning, /not trusted/);
+  assert.doesNotMatch(warning, /10\.9\.8\.7/, 'the exact address is not described as ignored');
+});
+
+test('only net.isIP addresses are trusted, and a valid list is normalized', () => {
+  const rejected = [
+    ['gateway.local', 'a hostname'],
+    ['[::1]', 'a bracketed address'],
+    ['fe80::1%eth0', 'an IPv6 zone index'],
+    ['172.29.73.0/24', 'a CIDR range'],
+    ['*', 'a wildcard'],
+  ];
+  for (const [entry, label] of rejected) {
+    assert.equal(
+      resolveTrustedPeers({
+        env: { GEV_KEY_SETUP_TRUSTED_PEERS: entry },
+        routeTable: BRIDGE_ROUTES,
+      }),
+      '',
+      `${label} does not fall through to the gateway`,
+    );
+    const warning = unmatchedTrustedPeerWarning(entry);
+    assert.match(warning, /not trusted/, label);
+    assert.equal(warning.match(/addresses \((.*)\)\./)[1], entry, label);
+  }
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: '10.9.8.7, none' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '10.9.8.7',
+    'none inside a list is not an address',
+  );
+  const noneInList = unmatchedTrustedPeerWarning('10.9.8.7, none');
+  assert.match(noneInList, /not trusted/);
+  assert.equal(noneInList.match(/addresses \((.*)\)\./)[1], 'none');
+  assert.doesNotMatch(noneInList, /10\.9\.8\.7/);
+  assert.equal(
+    resolveTrustedPeers({
+      env: {
+        GEV_KEY_SETUP_TRUSTED_PEERS:
+          ' 10.9.8.7 , ::1 , gateway.local , [::1] , fe80::1%eth0 , 172.29.73.0/24 , none , * ',
+      },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '10.9.8.7, ::1',
+  );
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: ' 10.9.8.7 ,  192.168.0.1 ' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '10.9.8.7, 192.168.0.1',
+    'a list of exact addresses is trimmed and joined with a comma and a space',
+  );
 });
 
 test('an unwritable checkout is named at start instead of failing quietly', () => {

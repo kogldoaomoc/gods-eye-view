@@ -11,6 +11,7 @@
  * Vite the way scripts/pinokio-start.mjs does.
  */
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDirectInvocation } from './pinokio-install.mjs';
@@ -47,18 +48,69 @@ export function defaultGatewayFromRouteTable(text) {
 }
 
 /**
+ * Whether one list entry is an address the admission gate can exact-match.
+ * `net.isIP` is the check. It also accepts an IPv6 zone index (`fe80::1%eth0`);
+ * the socket address never carries that suffix, so a zone is not an exact match.
+ * @param {string} entry Trimmed list entry.
+ * @returns {boolean}
+ */
+function isExactTrustedAddress(entry) {
+  return Boolean(entry) && Boolean(isIP(entry)) && !entry.includes('%');
+}
+
+/**
+ * Entries the Provider Settings gate cannot match. It compares exact addresses
+ * only, so a hostname, bracketed address, zone index, CIDR range, wildcard, or
+ * a `none` token inside a list would be logged as trusted and then match nothing.
+ * The whole value `none` is the opt-out, not a bad entry.
+ * @param {string} value Operator GEV_KEY_SETUP_TRUSTED_PEERS value.
+ * @returns {string[]}
+ */
+export function unmatchedTrustedPeerEntries(value) {
+  if (String(value ?? '').trim().toLowerCase() === 'none') return [];
+  return String(value ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry && !isExactTrustedAddress(entry));
+}
+
+/**
+ * Warning for entries that are not exact IP addresses, or null when every
+ * entry is one (or the operator set `none`).
+ * @param {string} value Operator GEV_KEY_SETUP_TRUSTED_PEERS value.
+ * @returns {string|null}
+ */
+export function unmatchedTrustedPeerWarning(value) {
+  const rejected = unmatchedTrustedPeerEntries(value);
+  if (!rejected.length) return null;
+  const noun = rejected.length === 1 ? 'entry' : 'entries';
+  return (
+    `[Docker] Ignoring GEV_KEY_SETUP_TRUSTED_PEERS ${noun} that are not exact ` +
+    `addresses (${rejected.join(', ')}). A CIDR range or * matches nothing and is not trusted.`
+  );
+}
+
+/**
  * Decide this launch's trusted-peer list. An operator value always wins, so a
  * compose override stays authoritative; `none` trusts no additional peers.
- * An unset or blank value means the gateway alone is
- * trusted. No gateway trusts nothing and Provider Settings stays loopback-only,
- * exactly as under `npm run dev`.
+ * Anything `net.isIP` rejects is dropped, and so is an IPv6 zone index:
+ * the admission gate matches exact addresses only, so those entries would
+ * trust nothing. An unset or blank value means the gateway alone is trusted.
+ * No gateway, and an explicit list with no exact address left, trusts nothing
+ * and Provider Settings stays loopback-only, exactly as under `npm run dev`.
  * @param {{env?: NodeJS.ProcessEnv, routeTable?: string}} input
  * @returns {string} Value for GEV_KEY_SETUP_TRUSTED_PEERS ('' trusts nothing).
  */
 export function resolveTrustedPeers({ env = process.env, routeTable = '' } = {}) {
   const explicit = String(env.GEV_KEY_SETUP_TRUSTED_PEERS ?? '').trim();
   if (explicit.toLowerCase() === 'none') return '';
-  if (explicit) return explicit;
+  if (explicit) {
+    return explicit
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => isExactTrustedAddress(entry))
+      .join(', ');
+  }
   return defaultGatewayFromRouteTable(routeTable) ?? '';
 }
 
@@ -107,9 +159,10 @@ async function start() {
     );
   }
 
-  const fromOperator = Boolean(
-    String(process.env.GEV_KEY_SETUP_TRUSTED_PEERS ?? '').trim(),
-  );
+  const explicitPeers = String(process.env.GEV_KEY_SETUP_TRUSTED_PEERS ?? '').trim();
+  const peerWarning = unmatchedTrustedPeerWarning(explicitPeers);
+  if (peerWarning) console.warn(peerWarning);
+  const fromOperator = Boolean(explicitPeers);
   const trustedPeers = resolveTrustedPeers({ routeTable: readRouteTable() });
   // Set even an empty list before Vite loads .env: the resolved launcher policy
   // must remain authoritative when there is no trusted gateway.
@@ -120,8 +173,10 @@ async function start() {
         ? `[Docker] Provider Settings trusted peers: ${trustedPeers} (GEV_KEY_SETUP_TRUSTED_PEERS).`
         : `[Docker] Provider Settings trusts the container gateway (${trustedPeers}).`,
     );
-  } else if (fromOperator) {
+  } else if (explicitPeers.toLowerCase() === 'none') {
     console.log('[Docker] Provider Settings trusts no additional peers (GEV_KEY_SETUP_TRUSTED_PEERS=none).');
+  } else if (peerWarning) {
+    console.log('[Docker] Provider Settings stays loopback-only.');
   } else {
     console.log('[Docker] No default gateway; Provider Settings stays loopback-only.');
   }
