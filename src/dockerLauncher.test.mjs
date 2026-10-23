@@ -5,6 +5,7 @@ import {
   defaultGatewayFromRouteTable,
   unwritableRootWarning,
   resolveTrustedPeers,
+  unmatchedTrustedPeerWarning,
 } from '../scripts/docker-start.mjs';
 
 // The shape of /proc/net/route inside a bridge-networked container:
@@ -54,6 +55,44 @@ test('an operator list wins, and no gateway trusts nothing', () => {
     'a blank override falls through to the gateway',
   );
   assert.equal(resolveTrustedPeers({ env: {}, routeTable: '' }), '', 'loopback-only when there is no gateway');
+});
+
+test('a CIDR range or * is not trusted and is named in a warning', () => {
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: '*' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '',
+    'a wildcard does not fall through to the gateway',
+  );
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: '172.29.73.0/24' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '',
+    'a prefix does not fall through to the gateway',
+  );
+  assert.equal(
+    resolveTrustedPeers({
+      env: { GEV_KEY_SETUP_TRUSTED_PEERS: ' 10.9.8.7, 172.29.73.0/24, * ' },
+      routeTable: BRIDGE_ROUTES,
+    }),
+    '10.9.8.7',
+    'exact addresses in the same list stay',
+  );
+  assert.equal(
+    unmatchedTrustedPeerWarning('10.9.8.7'),
+    null,
+    'an exact address needs no warning',
+  );
+  assert.equal(unmatchedTrustedPeerWarning('none'), null, 'none is a real setting, not a bad entry');
+  const warning = unmatchedTrustedPeerWarning(' 10.9.8.7, 172.29.73.0/24, * ');
+  assert.match(warning, /172\.29\.73\.0\/24/);
+  assert.match(warning, /\*/);
+  assert.match(warning, /not trusted/);
+  assert.doesNotMatch(warning, /10\.9\.8\.7/, 'the exact address is not described as ignored');
 });
 
 test('an unwritable checkout is named at start instead of failing quietly', () => {

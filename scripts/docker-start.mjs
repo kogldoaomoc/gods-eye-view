@@ -47,18 +47,59 @@ export function defaultGatewayFromRouteTable(text) {
 }
 
 /**
+ * Entries the Provider Settings gate cannot match. It compares exact addresses
+ * only, so a CIDR prefix or a `*` wildcard would be logged as trusted and then
+ * match nothing.
+ * @param {string} value Operator GEV_KEY_SETUP_TRUSTED_PEERS value.
+ * @returns {string[]}
+ */
+export function unmatchedTrustedPeerEntries(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.includes('*') || entry.includes('/'));
+}
+
+/**
+ * Warning for CIDR prefixes and `*` wildcards, or null when every entry is an
+ * exact address (or the operator set `none`).
+ * @param {string} value Operator GEV_KEY_SETUP_TRUSTED_PEERS value.
+ * @returns {string|null}
+ */
+export function unmatchedTrustedPeerWarning(value) {
+  if (String(value ?? '').trim().toLowerCase() === 'none') return null;
+  const rejected = unmatchedTrustedPeerEntries(value);
+  if (!rejected.length) return null;
+  const noun = rejected.length === 1 ? 'entry' : 'entries';
+  return (
+    `[Docker] Ignoring GEV_KEY_SETUP_TRUSTED_PEERS ${noun} that are not exact ` +
+    `addresses (${rejected.join(', ')}). A CIDR range or * matches nothing and is not trusted.`
+  );
+}
+
+/**
  * Decide this launch's trusted-peer list. An operator value always wins, so a
  * compose override stays authoritative; `none` trusts no additional peers.
- * An unset or blank value means the gateway alone is
- * trusted. No gateway trusts nothing and Provider Settings stays loopback-only,
- * exactly as under `npm run dev`.
+ * CIDR prefixes and `*` wildcards are dropped: the admission gate matches
+ * exact addresses only, so those entries would trust nothing. An unset or
+ * blank value means the gateway alone is trusted. No gateway, and an explicit
+ * list with no exact address left, trusts nothing and Provider Settings stays
+ * loopback-only, exactly as under `npm run dev`.
  * @param {{env?: NodeJS.ProcessEnv, routeTable?: string}} input
  * @returns {string} Value for GEV_KEY_SETUP_TRUSTED_PEERS ('' trusts nothing).
  */
 export function resolveTrustedPeers({ env = process.env, routeTable = '' } = {}) {
   const explicit = String(env.GEV_KEY_SETUP_TRUSTED_PEERS ?? '').trim();
   if (explicit.toLowerCase() === 'none') return '';
-  if (explicit) return explicit;
+  if (explicit) {
+    const rejected = new Set(unmatchedTrustedPeerEntries(explicit));
+    if (!rejected.size) return explicit;
+    return explicit
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry && !rejected.has(entry))
+      .join(',');
+  }
   return defaultGatewayFromRouteTable(routeTable) ?? '';
 }
 
@@ -107,9 +148,10 @@ async function start() {
     );
   }
 
-  const fromOperator = Boolean(
-    String(process.env.GEV_KEY_SETUP_TRUSTED_PEERS ?? '').trim(),
-  );
+  const explicitPeers = String(process.env.GEV_KEY_SETUP_TRUSTED_PEERS ?? '').trim();
+  const peerWarning = unmatchedTrustedPeerWarning(explicitPeers);
+  if (peerWarning) console.warn(peerWarning);
+  const fromOperator = Boolean(explicitPeers);
   const trustedPeers = resolveTrustedPeers({ routeTable: readRouteTable() });
   // Set even an empty list before Vite loads .env: the resolved launcher policy
   // must remain authoritative when there is no trusted gateway.
@@ -120,8 +162,10 @@ async function start() {
         ? `[Docker] Provider Settings trusted peers: ${trustedPeers} (GEV_KEY_SETUP_TRUSTED_PEERS).`
         : `[Docker] Provider Settings trusts the container gateway (${trustedPeers}).`,
     );
-  } else if (fromOperator) {
+  } else if (explicitPeers.toLowerCase() === 'none') {
     console.log('[Docker] Provider Settings trusts no additional peers (GEV_KEY_SETUP_TRUSTED_PEERS=none).');
+  } else if (peerWarning) {
+    console.log('[Docker] Provider Settings stays loopback-only.');
   } else {
     console.log('[Docker] No default gateway; Provider Settings stays loopback-only.');
   }
