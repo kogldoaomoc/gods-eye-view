@@ -222,8 +222,9 @@ def make_observation(
     confidence: float = 0.5,
     raw: str | None = None,
     at: str | None = None,
+    ownership: str | None = None,
 ) -> dict:
-    return {
+    observation = {
         "tool": tool,
         "toolVersion": tool_version,
         "query": query,
@@ -231,6 +232,9 @@ def make_observation(
         "confidence": max(0.0, min(1.0, float(confidence))),
         "raw": raw,
     }
+    if ownership:
+        observation["ownership"] = ownership
+    return observation
 
 
 def make_link(source_id: str, target_id: str, relation: str) -> dict:

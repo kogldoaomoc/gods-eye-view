@@ -89,7 +89,7 @@ python -m casefile export case_xxxxxxxxxxxx -o case.geojson --pretty
 | GET | `/api/cases/:id/entities` | Entities, filtered by `bbox`, `types`, `minConfidence`, `text`, `limit` |
 | GET | `/api/cases/:id/entities/:entityId` | One entity with observations and links |
 | POST | `/api/cases/:id/entities/:entityId/flags` | `{hidden, verified}` |
-| GET/POST | `/api/cases/:id/jobs` | List or start jobs `{selector, tools?, selectorType?}`. Sherlock, Maigret and PhoneInfoga return 403 without verified consent |
+| GET/POST | `/api/cases/:id/jobs` | List or start jobs `{selector, tools?, selectorType?}`. A username, email, phone or person selector returns 403 without a consent that covers the tool |
 | POST | `/api/cases/:id/verifications` | Data package: one pending verification per identifier |
 | GET | `/api/cases/:id/verifications` | Checklist of those verifications |
 | POST | `/api/cases/:id/verifications/:id/confirm` | `{code}` or `{oauthCode, state}` |
@@ -125,9 +125,11 @@ python -m casefile export case_xxxxxxxxxxxx -o case.geojson --pretty
 | `CASEFILE_OAUTH_<NAME>_USERINFO_URL` | Userinfo endpoint |
 | `CASEFILE_OAUTH_<NAME>_USER_FIELD` | JSON field holding the username (default `login`) |
 
-Sherlock, Maigret and PhoneInfoga run on an email, phone or username only
-after a verified consent for that identifier. The flow and the consent and
-audit records are described in [`../docs/CASEFILE.md`](../docs/CASEFILE.md).
+A username, email, phone or person selector runs only after a verified consent
+that covers the requested tool. Domain, host, IP, ASN and cert selectors stay
+ungated. The flow and the consent and audit records are described in
+[`../docs/CASEFILE.md`](../docs/CASEFILE.md). Optional header
+`X-Casefile-Operator` is stored on the audit row when it is a short opaque id.
 
 ## Tests
 

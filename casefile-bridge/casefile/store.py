@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS observations (
   at TEXT NOT NULL,
   confidence REAL NOT NULL,
   raw TEXT,
+  ownership TEXT,
   UNIQUE(entity_id, tool, query, at)
 );
 CREATE INDEX IF NOT EXISTS observations_entity ON observations(entity_id);
@@ -67,10 +68,16 @@ class CaseStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._ensure_columns()
         self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
+
+    def _ensure_columns(self) -> None:
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(observations)")}
+        if "ownership" not in columns:
+            self._conn.execute("ALTER TABLE observations ADD COLUMN ownership TEXT")
 
     # -- metadata -----------------------------------------------------------
     def set_meta(self, key: str, value: str) -> None:
@@ -90,7 +97,11 @@ class CaseStore:
         new_entities = 0
         updated = 0
         for entity in entities:
-            if self._upsert_entity(entity, observation):
+            ownership = entity.pop("_ownership", None)
+            applied = observation
+            if ownership:
+                applied = {**observation, "ownership": ownership}
+            if self._upsert_entity(entity, applied):
                 new_entities += 1
             else:
                 updated += 1
@@ -134,8 +145,8 @@ class CaseStore:
         if geo and "lat" in geo:
             self._index_geo(entity["id"], geo)
         self._conn.execute(
-            "INSERT OR IGNORE INTO observations(entity_id, tool, tool_version, query, at, confidence, raw)"
-            " VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO observations(entity_id, tool, tool_version, query, at, confidence, raw, ownership)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entity["id"],
                 observation["tool"],
@@ -144,6 +155,7 @@ class CaseStore:
                 at,
                 observation["confidence"],
                 observation.get("raw"),
+                observation.get("ownership"),
             ),
         )
         return is_new
@@ -221,6 +233,7 @@ class CaseStore:
                 "at": obs["at"],
                 "confidence": obs["confidence"],
                 "raw": obs["raw"],
+                **({"ownership": obs["ownership"]} if obs["ownership"] else {}),
             }
             for obs in self._conn.execute(
                 "SELECT * FROM observations WHERE entity_id=? ORDER BY at", (entity_id,)

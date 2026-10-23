@@ -12,7 +12,9 @@ def _by_type(result, entity_type):
 
 def test_registry_default_routing():
     assert adapters.default_tools("username") == ["maigret", "sherlock"]
+    assert adapters.default_tools("email") == ["theharvester"]
     assert adapters.default_tools("domain") == ["theharvester", "spiderfoot"]
+    assert adapters.default_tools("person") == []
     assert "spiderfoot" in adapters.tools_for("ip")
 
 

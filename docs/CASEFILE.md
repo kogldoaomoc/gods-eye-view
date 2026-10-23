@@ -173,10 +173,10 @@ Responsibilities:
 - **Secrets.** Any API keys a tool needs live in the bridge's environment, never in the
   browser and never in case files. SMTP, SMS and OAuth secrets used for
   verified consent are the same: environment only, never in a response or a log.
-- **Verified consent.** Sherlock, Maigret and PhoneInfoga do not run on an
-  email, phone or username until that identifier has a verified consent
-  record. The check is in the job queue and the HTTP API, and the adapter
-  modules are unchanged. The flow and the record layout are in
+- **Verified consent.** Any tool aimed at a username, email, phone or person
+  name waits for a verified consent that covers that tool. Domain, host, IP,
+  ASN and cert lookups do not. The check is in the job queue and the HTTP API,
+  and the adapter modules are unchanged. The flow and the record layout are in
   [Verified consent](#verified-consent).
 
 ### 2. GEV server provider: `server/providers/casefile/`
@@ -302,9 +302,11 @@ Which tools run by default for each selector type. Users can tick others.
 | IP or netblock | SpiderFoot | Recon-ng | GeoLite2, `city` precision |
 | Organization or address | SpiderFoot | | Geocoded addresses |
 
-SpiderFoot overlaps most of the others. It is used for broad scans; the
-dedicated tools run directly when the user wants one fast answer. The
-entity hash removes duplicates between them.
+A free-text person name has no default route. Username, email and phone
+defaults do not run until a consent record covers the tool. Domain, host, IP,
+ASN and cert stay ungated. SpiderFoot overlaps most of the others. It is used
+for broad scans; the dedicated tools run directly when the user wants one fast
+answer. The entity hash removes duplicates between them.
 
 ## Performance budget
 
@@ -348,11 +350,15 @@ entity hash removes duplicates between them.
 
 ## Verified consent
 
-Sherlock, Maigret and PhoneInfoga may run on an email address, a phone number
-or a username only after the person who controls that identifier has proved
-it. SpiderFoot, and theHarvester on a domain, host or IP, are unchanged and
-do not ask for consent. A client can stay anonymous: the record has no name
-and no contact field.
+Any tool may run on a username, email, phone or person name only after the
+person who controls that identifier has proved it, and only when the consent
+names that tool. The gate is the selector type, checked when the job is
+accepted and again when it starts, so a later adapter cannot skip it.
+SpiderFoot on a domain, host or IP, theHarvester on a domain, and ASN or cert
+lookups do not ask for consent. A free-text person name is not a default
+lookup and is not a verifiable identifier: an explicit person job is refused
+unless a consent already covers that exact name and tool. A client can stay
+anonymous: the record has no name and no contact field.
 
 The office flow is one data package. The client hands over a batch of their
 own identifiers. The case opens one verification per identifier and sends
@@ -370,14 +376,18 @@ or one alternate contact as proof for several identifiers.
 | --- | --- | --- |
 | Email | `email_code` | A one-time code sent to that address over SMTP |
 | Phone | `sms_code` | An SMS code sent to that number |
-| Username | `profile_code` | The client posts a generated code on that public profile. The bridge fetches the profile and checks that the code is there. This method is always available |
+| Username | `profile_code` | The client posts a generated code on that public profile. The bridge fetches GitHub or Reddit and checks that the code is there. GitLab and X/Twitter do not expose profile text to this fetch; use OAuth for those |
 | Username | `oauth` | The client signs in with an OAuth provider configured on the server, where that is practical |
 
 OAuth is a pluggable `OAuthProvider`. No provider is enabled until the server
-environment names one. Profile-code does not depend on it. SMS is a pluggable
-sender with a console implementation for local development and tests. Codes
-are single-use, expire after 15 minutes, are rate-limited (five sends per
-identifier per hour, five confirm attempts), and are compared in constant time.
+environment names one. SMS is a pluggable sender with a console implementation
+for local development and tests. Codes are single-use, expire after 15
+minutes, and are compared in constant time. Sends are limited to five per
+identifier per hour, 50 per case per hour and 200 per hour across the bridge,
+and a package holds at most 50 identifiers. A confirm has five attempts. The
+attempt check and the increment are one update, so parallel confirms cannot
+pass that limit. Usernames and emails are normalized with NFKC and then
+casefold, so `straße` and `strasse` are one identifier, and so are `ﬁ` and `fi`.
 
 `POST /api/cases/:id/verifications` with `{identifiers: [{type, value, method, tools?, platform?}]}`
 creates the batch and returns a checklist. Each entry is `pending`,
@@ -390,20 +400,26 @@ them. `POST /api/cases/:id/verifications/:id/confirm` completes one row.
 ### Consent record
 
 One row per verified identifier, in the bridge's `consent.sqlite`. The raw
-identifier is not stored. The pending verification row keeps the identifier
-the client just handed over so the checklist can be matched to the package
-and a profile fetch knows which username to read. That value is not copied
-onto the consent record.
+identifier is not stored. A pending verification keeps the raw value only
+until the code is consumed or the code or the record expires, because a
+profile fetch has to know which username to read. After that, a sweeper that
+runs at startup and about once a minute leaves the hash and a masked display
+form (`a•••@domain`, a phone prefix and last two digits, or a shortened
+username). The checklist returns that mask as `identifierMasked` and never
+the raw value. The console SMS log uses the same phone mask. The verification
+record expires on the same 24-hour lifetime as the consent; the code itself
+still expires after 15 minutes (`code_expires_at`).
 
 | Field | Meaning |
 | --- | --- |
 | `id` | `cns_` and 12 hex characters |
 | `case_id` | Case the consent belongs to |
-| `identifier_hash` | HMAC-SHA256 of the type and the normalized identifier, keyed with `CASEFILE_CONSENT_SALT`. Usernames are folded before hashing |
+| `identifier_hash` | HMAC-SHA256 of the type and the NFKC-normalized, casefolded identifier, keyed with `CASEFILE_CONSENT_SALT` |
 | `identifier_type` | `email`, `phone` or `username` |
 | `method` | `email_code`, `sms_code`, `profile_code` or `oauth` |
+| `platform` | Username platform the proof came from, such as `github`. Null for email and phone |
 | `verified_at` | When the challenge was accepted |
-| `tools` | Subset of `sherlock`, `maigret`, `phoneinfoga` that this consent allows |
+| `tools` | Registered adapters this consent allows, for example `sherlock`, `maigret`, `phoneinfoga`, `theharvester`, `spiderfoot` |
 | `expires_at` | Consent lifetime, 24 hours from verification |
 | `revoked_at` | Null while the consent is live |
 
@@ -411,6 +427,11 @@ A lookup is allowed only when a row for that case and identifier hash is
 verified, `expires_at` is still in the future, `revoked_at` is null, and the
 tool is in `tools`. Normalization matches the entity schema, so
 `Owner@Example.com` and `owner@example.com` are one identifier.
+
+A username proof is for one platform. Sherlock and Maigret observations store
+`ownership`: the username itself and accounts on the verified platform are
+`verified`, and hits on every other platform are `unverified`. The GeoJSON
+export copies that onto the feature, and a mixed entity stays `unverified`.
 
 ### Audit log
 
@@ -422,21 +443,24 @@ deletes on this table are rejected.
 | Field | Meaning |
 | --- | --- |
 | `consent_id` | Consent row used for the decision, or null when none applies |
-| `tool` | `sherlock`, `maigret` or `phoneinfoga` |
+| `tool` | Adapter the lookup asked for |
+| `selector_hash` | The same identifier HMAC the consent uses, never the raw selector |
+| `actor` | Opaque operator id from `X-Casefile-Operator` (`[A-Za-z0-9_.:-]{1,64}`), otherwise `local`. Client names are not stored |
 | `at` | Time of the attempt |
 | `result` | `allowed` or `refused` |
 
-The case id is stored beside those fields so the shared log can be filtered.
-The selector is not stored.
+Rows are inserted with a plain `INSERT`. The bridge turns recursive triggers on, so the append-only delete trigger also rejects `INSERT OR REPLACE`. Updates and deletes are rejected too. The case id is stored beside those fields so the shared log can be filtered. The selector is not stored.
 
 ### Enforcement
 
-The HTTP server and the job runner both refuse a Sherlock, Maigret or
-PhoneInfoga job that lacks a valid consent. The response is HTTP 403 and
-names the tool and the reason (`no verified consent`, `consent has expired`,
-`consent has been revoked`, `consent does not cover <tool>`). No job from
-that request is queued, and the tool is not started. A request that only
-names SpiderFoot or theHarvester is accepted as before.
+The HTTP server and the job runner both refuse a job whose selector type is
+`username`, `email`, `phone` or `person` when that tool has no valid consent.
+The response is HTTP 403 and names the tool and the reason (`no verified
+consent`, `a person name is not a verifiable identifier`, `consent has
+expired`, `consent has been revoked`, `consent does not cover <tool>`). No
+job from that request is queued, and the tool is not started. Domain, host,
+IP, ASN and cert jobs are accepted without a consent record. A detected
+person name starts no default job.
 
 ## Implementation phases
 

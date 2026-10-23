@@ -15,6 +15,7 @@ import json
 import os
 import smtplib
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,13 +25,15 @@ from urllib.parse import quote
 from .http import USER_AGENT
 
 # Public profile URLs the bridge will fetch. Callers cannot supply a URL.
+# GitHub's API and Reddit's about.json expose profile text to an anonymous
+# fetch. GitLab and X/Twitter do not, so they are not profile-code platforms;
+# OAuth is the alternative there.
 PLATFORM_URLS = {
     "github": "https://api.github.com/users/{username}",
-    "gitlab": "https://gitlab.com/api/v4/users?username={username}",
     "reddit": "https://www.reddit.com/user/{username}/about.json",
-    "x": "https://x.com/{username}",
-    "twitter": "https://x.com/{username}",
 }
+PROFILE_TEXT_UNAVAILABLE = frozenset({"gitlab", "x", "twitter"})
+_MAX_REDIRECTS = 5
 
 
 class DeliveryError(RuntimeError):
@@ -95,7 +98,7 @@ class ConsoleSmsSender(SmsSender):
         if not isinstance(to, str) or not to.startswith("+") or any(ch in to for ch in "\r\n,;"):
             raise DeliveryError("sms delivery failed")
         self.sent.append((to, body))
-        print(f"casefile-sms: delivered to {to} ({len(body)} chars)", file=sys.stderr)
+        print(f"casefile-sms: delivered to {mask_phone(to)} ({len(body)} chars)", file=sys.stderr)
 
 
 class UnavailableSmsSender(SmsSender):
@@ -113,27 +116,111 @@ def sms_from_env() -> SmsSender:
     return UnavailableSmsSender("sms delivery is not configured")
 
 
+class _Redirect(Exception):
+    def __init__(self, url: str):
+        self.url = url
+
+
+class _ManualRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface the next URL instead of following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise _Redirect(newurl)
+
+
 class HttpProfileFetcher:
-    """Fetch the public profile text for a username on a known platform."""
+    """Fetch the public profile text for a username on a known platform.
+
+    Redirects stay on the same hostname. A total deadline covers every hop,
+    not only one socket timeout. Path-like usernames are rejected.
+    """
+
+    def __init__(self, *, deadline_s: float = 20):
+        self.deadline_s = deadline_s
 
     def supports(self, platform: str) -> bool:
         return platform in PLATFORM_URLS
 
     def fetch_text(self, platform: str, username: str) -> str:
         template = PLATFORM_URLS.get(platform)
-        if not template or not username or any(ch in username for ch in "/\r\n?# "):
+        if not template or not profile_username_ok(username):
             raise DeliveryError("could not fetch the public profile")
         url = template.format(username=quote(username, safe=""))
-        request = urllib.request.Request(
-            url,
-            headers={"Accept": "application/json, text/html;q=0.9", "User-Agent": USER_AGENT},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                raw = response.read(65537)
-        except Exception:
-            raise DeliveryError("could not fetch the public profile") from None
-        return raw[:65536].decode("utf-8", "replace")
+        return self._fetch_limited(url)
+
+    def _fetch_limited(self, url: str) -> str:
+        deadline = time.monotonic() + self.deadline_s
+        opener = urllib.request.build_opener(_ManualRedirect)
+        current = url
+        hops = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DeliveryError("could not fetch the public profile")
+            request = urllib.request.Request(
+                current,
+                headers={"Accept": "application/json, text/html;q=0.9", "User-Agent": USER_AGENT},
+            )
+            try:
+                with opener.open(request, timeout=remaining) as response:
+                    raw = response.read(65537)
+                return raw[:65536].decode("utf-8", "replace")
+            except _Redirect as hop:
+                hops += 1
+                if hops > _MAX_REDIRECTS or not _same_hostname(current, hop.url):
+                    raise DeliveryError("could not fetch the public profile") from None
+                if urllib.parse.urlparse(hop.url).scheme not in ("http", "https"):
+                    raise DeliveryError("could not fetch the public profile")
+                current = hop.url
+            except DeliveryError:
+                raise
+            except Exception:
+                raise DeliveryError("could not fetch the public profile") from None
+
+
+def profile_username_ok(username: str) -> bool:
+    """False for empty, dotted, or path-like usernames."""
+    if not isinstance(username, str) or not username or username in {".", ".."}:
+        return False
+    if username.startswith(".") or ".." in username:
+        return False
+    return not any(ch in username for ch in "/\\%\r\n?# \t")
+
+
+def mask_identifier(identifier_type: str, value: str) -> str:
+    if identifier_type == "email":
+        return mask_email(value)
+    if identifier_type == "phone":
+        return mask_phone(value)
+    return mask_username(value)
+
+
+def mask_email(address: str) -> str:
+    local, sep, domain = address.partition("@")
+    if not sep or not local:
+        return "•••"
+    return local[0] + "•••@" + domain
+
+
+def mask_phone(number: str) -> str:
+    """Keep a short prefix and the last two digits. The full number is not a substring."""
+    if not isinstance(number, str) or len(number) <= 4:
+        return "•" * max(len(number) if isinstance(number, str) else 1, 1)
+    return number[:2] + ("•" * (len(number) - 4)) + number[-2:]
+
+
+def mask_username(name: str) -> str:
+    if not name:
+        return "•"
+    if len(name) <= 2:
+        return name[0] + "•"
+    return name[0] + ("•" * (len(name) - 2)) + name[-1]
+
+
+def _same_hostname(left: str, right: str) -> bool:
+    a = (urllib.parse.urlparse(left).hostname or "").casefold()
+    b = (urllib.parse.urlparse(right).hostname or "").casefold()
+    return bool(a) and a == b
 
 
 class OAuthProvider:

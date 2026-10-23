@@ -193,7 +193,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not selector:
                     raise ValueError("selector is required")
                 jobs = bridge.runner.submit(
-                    case_id, selector, body.get("tools"), selector_type=body.get("selectorType")
+                    case_id,
+                    selector,
+                    body.get("tools"),
+                    selector_type=body.get("selectorType"),
+                    actor=self.headers.get("X-Casefile-Operator"),
                 )
                 return self._send(202, {"jobs": jobs})
         match = re.fullmatch(rf"/api/cases/{_CASE}/verifications", path)

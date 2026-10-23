@@ -26,7 +26,9 @@ _ADAPTERS: tuple[Adapter, ...] = (
 REGISTRY: dict[str, Adapter] = {adapter.name: adapter for adapter in _ADAPTERS}
 
 # Tools run for each selector type when the caller does not name a set. Legacy
-# adapters are never a default; the user ticks them explicitly.
+# adapters are never a default; the user ticks them explicitly. A free-text
+# person name has no default: it is not a verifiable identifier. Username,
+# email and phone defaults still pass the consent gate before they run.
 DEFAULT_ROUTING: dict[str, tuple[str, ...]] = {
     "username": ("maigret", "sherlock"),
     "email": ("theharvester",),
@@ -34,7 +36,6 @@ DEFAULT_ROUTING: dict[str, tuple[str, ...]] = {
     "domain": ("theharvester", "spiderfoot"),
     "host": ("spiderfoot",),
     "ip": ("spiderfoot",),
-    "person": ("spiderfoot",),
     "organization": ("spiderfoot",),
     "address": ("spiderfoot",),
 }
