@@ -96,7 +96,7 @@ class JobRunner:
         actor: str | None = None,
     ):
         self.registry.store(case_id)  # raises KeyError for an unknown case
-        stype = selector_type or schema.detect_selector(selector)
+        stype = prepare_selector(selector, selector_type)
         chosen = tools or adapters.default_tools(stype)
         actor = normalize_actor(actor)
         planned = []
@@ -219,6 +219,12 @@ class JobRunner:
             self._slots.release()
 
     def _execute(self, job: Job) -> dict:
+        # Classify again at start. A queued job must not keep a caller-supplied
+        # type that the selector string does not actually have.
+        try:
+            job.selector_type = prepare_selector(job.selector, job.selector_type)
+        except ValueError as error:
+            raise AdapterError(str(error)) from None
         platform = None
         if job.selector_type in GATED_SELECTOR_TYPES:
             if self.consent is None:
@@ -240,7 +246,7 @@ class JobRunner:
         else:
             ctx = RunContext(env=None, timeout_s=adapter.timeout_s, cancel_event=job.cancel)
             try:
-                native = adapter.run(job.selector, job.selector_type, ctx)
+                native = adapter.run(normalized_selector, job.selector_type, ctx)
             finally:
                 ctx.close()
             raw_ref = self._archive(job, native)
@@ -296,6 +302,40 @@ class JobRunner:
             self._on_event(event)
         except Exception:
             pass
+
+
+def prepare_selector(selector: str, declared: str | None) -> str:
+    """Return the type this selector will be scanned as.
+
+    The declared type is checked, not trusted. Organization is not a lookup
+    target. A string ``detect_selector`` calls a username, email, phone or
+    person keeps that type even when the caller said domain, host or similar,
+    unless the declared infrastructure type actually validates.
+    """
+    if not isinstance(selector, str) or not selector.strip():
+        raise ValueError("selector is required")
+    selector = selector.strip()
+    if declared == "organization":
+        raise ValueError("organization is not a lookup target")
+    try:
+        detected = schema.detect_selector(selector)
+    except schema.SchemaError as error:
+        raise ValueError(str(error)) from None
+    if declared in (None, ""):
+        declared = detected
+    if not isinstance(declared, str):
+        raise ValueError("selectorType is not valid")
+    if declared in schema.INFRASTRUCTURE_TYPES:
+        try:
+            schema.validate_infrastructure(declared, selector)
+        except schema.SchemaError:
+            if detected in GATED_SELECTOR_TYPES:
+                return detected
+            raise ValueError("selector does not match its type") from None
+        return declared
+    if detected in GATED_SELECTOR_TYPES:
+        return detected
+    return declared
 
 
 def _mark_ownership(entities: list[dict], platform: str) -> None:

@@ -30,7 +30,12 @@ class TheHarvesterAdapter(Adapter):
         binary = self.binary(ctx.env)
         if not binary:
             raise AdapterError("theHarvester is not installed")
-        domain = selector.rsplit("@", 1)[-1] if selector_type == "email" else selector
+        if selector_type == "email":
+            domain = selector.rsplit("@", 1)[-1]
+        elif any(ch in selector for ch in "@\"' \t") or selector.startswith("+"):
+            raise AdapterError("theHarvester domain target must be a hostname")
+        else:
+            domain = selector
         sources = ctx.env.get("CASEFILE_THEHARVESTER_SOURCES", DEFAULT_SOURCES)
         completed = ctx.run_process([binary, "-d", domain, "-b", sources, "-f", "harvest"])
         report = ctx.workdir / "harvest.json"

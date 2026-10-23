@@ -300,11 +300,12 @@ Which tools run by default for each selector type. Users can tick others.
 | Phone | PhoneInfoga | SpiderFoot | `country` or `region` outline |
 | Domain | theHarvester, SpiderFoot | Recon-ng, sn0int | Hosts and IPs, via IP geolocation |
 | IP or netblock | SpiderFoot | Recon-ng | GeoLite2, `city` precision |
-| Organization or address | SpiderFoot | | Geocoded addresses |
+| Address | | | Not sent to a tool |
 
-A free-text person name has no default route. Username, email and phone
-defaults do not run until a consent record covers the tool. Domain, host, IP,
-ASN and cert stay ungated. SpiderFoot overlaps most of the others. It is used
+Organization is not a lookup target. A free-text person name has no default
+route. Username, email and phone defaults do not run until a consent record
+covers the tool. Domain, host, IP, ASN and cert stay ungated when the string
+really is that type. SpiderFoot overlaps most of the others. It is used
 for broad scans; the dedicated tools run directly when the user wants one fast
 answer. The entity hash removes duplicates between them.
 
@@ -376,7 +377,7 @@ or one alternate contact as proof for several identifiers.
 | --- | --- | --- |
 | Email | `email_code` | A one-time code sent to that address over SMTP |
 | Phone | `sms_code` | An SMS code sent to that number |
-| Username | `profile_code` | The client posts a generated code on that public profile. The bridge fetches GitHub or Reddit and checks that the code is there. GitLab and X/Twitter do not expose profile text to this fetch; use OAuth for those |
+| Username | `profile_code` | The client posts a generated code on that public profile. The bridge fetches GitHub or Reddit and checks that the code is there. Redirects stay on that host and do not drop from https to http. GitLab and X/Twitter do not expose profile text to this fetch; use OAuth for those |
 | Username | `oauth` | The client signs in with an OAuth provider configured on the server, where that is practical |
 
 OAuth is a pluggable `OAuthProvider`. No provider is enabled until the server
@@ -386,8 +387,13 @@ minutes, and are compared in constant time. Sends are limited to five per
 identifier per hour, 50 per case per hour and 200 per hour across the bridge,
 and a package holds at most 50 identifiers. A confirm has five attempts. The
 attempt check and the increment are one update, so parallel confirms cannot
-pass that limit. Usernames and emails are normalized with NFKC and then
-casefold, so `straße` and `strasse` are one identifier, and so are `ﬁ` and `fi`.
+pass that limit. Emails are normalized with NFKC and then casefold, so
+`ﬁle@example.com` and `file@example.com` are one identifier. Usernames are
+not. NFKC maps the ligature `ﬁ` and fullwidth letters onto ASCII, and
+casefold maps `ß` to `ss`, so hashing either form would let a consent for
+`strasse` authorize `straße`, `ﬁona` or `ｆｉｏｎａ`. Non-ASCII usernames are
+refused. ASCII usernames still casefold, so `JDoe` and `jdoe` are one
+identifier.
 
 `POST /api/cases/:id/verifications` with `{identifiers: [{type, value, method, tools?, platform?}]}`
 creates the batch and returns a checklist. Each entry is `pending`,
@@ -414,7 +420,7 @@ still expires after 15 minutes (`code_expires_at`).
 | --- | --- |
 | `id` | `cns_` and 12 hex characters |
 | `case_id` | Case the consent belongs to |
-| `identifier_hash` | HMAC-SHA256 of the type and the NFKC-normalized, casefolded identifier, keyed with `CASEFILE_CONSENT_SALT` |
+| `identifier_hash` | HMAC-SHA256 of the type and the identifier, keyed with `CASEFILE_CONSENT_SALT`. Emails are NFKC-normalized and casefolded. Usernames are ASCII, then casefolded, and are not NFKC-normalized |
 | `identifier_type` | `email`, `phone` or `username` |
 | `method` | `email_code`, `sms_code`, `profile_code` or `oauth` |
 | `platform` | Username platform the proof came from, such as `github`. Null for email and phone |
@@ -449,18 +455,33 @@ deletes on this table are rejected.
 | `at` | Time of the attempt |
 | `result` | `allowed` or `refused` |
 
-Rows are inserted with a plain `INSERT`. The bridge turns recursive triggers on, so the append-only delete trigger also rejects `INSERT OR REPLACE`. Updates and deletes are rejected too. The case id is stored beside those fields so the shared log can be filtered. The selector is not stored.
+Rows are inserted with a plain `INSERT`. A `BEFORE INSERT` trigger rejects a row whose id already exists, so `INSERT OR REPLACE` cannot rewrite the log from any connection, including one that has not turned recursive triggers on. Updates and deletes are rejected too. The case id is stored beside those fields so the shared log can be filtered. The selector is not stored.
 
 ### Enforcement
 
-The HTTP server and the job runner both refuse a job whose selector type is
-`username`, `email`, `phone` or `person` when that tool has no valid consent.
+The HTTP server and the job runner both classify the selector, then refuse a
+job whose type is `username`, `email`, `phone` or `person` when that tool has
+no valid consent. The declared type is checked, not trusted. A domain or host
+must be a dotted hostname, an IP must parse, an ASN must look like `AS64500`,
+and a cert must be a fingerprint or a hash. Quotes, spaces, `@` and a leading
+`+` fail those checks. When detection returns a username, email, phone or
+person, that type is what the gate uses, even if the caller said domain or
+host. Organization is rejected and is not scanned. Both checks run when the
+job is accepted and again when it starts.
+
 The response is HTTP 403 and names the tool and the reason (`no verified
 consent`, `a person name is not a verifiable identifier`, `consent has
 expired`, `consent has been revoked`, `consent does not cover <tool>`). No
-job from that request is queued, and the tool is not started. Domain, host,
-IP, ASN and cert jobs are accepted without a consent record. A detected
-person name starts no default job.
+job from that request is queued, and the tool is not started. A domain, host,
+IP, ASN or cert that passes the check is accepted without a consent record.
+A detected person name starts no default job.
+
+SpiderFoot has no target-type flag and guesses from the `-s` string, quoting
+a value with a space or with no dot. The bridge passes the decided type in
+`SPIDERFOOT_TARGET_TYPE` and does not start the tool when that guess would
+be a different type. theHarvester is only given a hostname: an email uses
+the domain part, and an `@`, quote, space or leading `+` is not passed as
+`-d`.
 
 ## Implementation phases
 

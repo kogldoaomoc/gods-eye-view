@@ -36,7 +36,6 @@ DEFAULT_ROUTING: dict[str, tuple[str, ...]] = {
     "domain": ("theharvester", "spiderfoot"),
     "host": ("spiderfoot",),
     "ip": ("spiderfoot",),
-    "organization": ("spiderfoot",),
     "address": ("spiderfoot",),
 }
 

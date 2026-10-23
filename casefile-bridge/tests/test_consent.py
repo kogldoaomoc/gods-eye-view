@@ -15,6 +15,7 @@ from casefile.adapters.maigret import MaigretAdapter
 from casefile.adapters.phoneinfoga import PhoneInfogaAdapter
 from casefile.adapters.sherlock import SherlockAdapter
 from casefile.adapters.spiderfoot import SpiderFootAdapter
+from casefile.adapters.base import AdapterError
 from casefile.adapters.theharvester import TheHarvesterAdapter
 from casefile.consent import ConsentError, ConsentRequired, ConsentService
 from casefile.delivery import (
@@ -24,6 +25,7 @@ from casefile.delivery import (
     HttpProfileFetcher,
     OAuthRegistry,
     SmtpEmailSender,
+    _Redirect,
 )
 from casefile.jobs import Job, JobRunner
 from casefile.server import make_server
@@ -530,7 +532,7 @@ def test_infrastructure_adapters_still_run_without_consent(tmp_path, inert_tools
             ("mail.example.com", ["spiderfoot"], "host"),
             ("203.0.113.7", ["spiderfoot"], "ip"),
             ("AS64496", ["spiderfoot"], "asn"),
-            ("abc123", ["spiderfoot"], "cert"),
+            ("ab" * 32, ["spiderfoot"], "cert"),
         ):
             status, payload = _request(
                 base,
@@ -669,18 +671,30 @@ def test_person_identifier_selectors_require_consent_for_any_tool(tmp_path, iner
         httpd.bridge.close()
 
 
-def test_nfkc_and_casefold_collapse_equivalent_identifiers(tmp_path):
+def test_non_ascii_usernames_are_refused_and_emails_still_fold(tmp_path):
     service, email, _sms, profiles, _provider = _service(tmp_path)
     case_id = "case_0123456789ab"
+    for value in ("straße", "ﬁona", "ｆｉｏｎａ"):
+        with pytest.raises(ConsentError, match="ASCII") as error:
+            _package(
+                service,
+                case_id,
+                [{"type": "username", "value": value, "method": "profile_code", "platform": "github", "tools": ["sherlock"]}],
+            )
+        assert error.value.status == 400
     username = _package(
         service,
         case_id,
-        [{"type": "username", "value": "straße", "method": "profile_code", "platform": "github", "tools": ["sherlock"]}],
+        [{"type": "username", "value": "JDoe", "method": "profile_code", "platform": "github", "tools": ["sherlock"]}],
     )
-    profiles.pages[("github", "straße")] = username[0]["profileCode"]
+    profiles.pages[("github", "JDoe")] = username[0]["profileCode"]
     service.confirm(case_id, username[0]["id"], code=username[0]["profileCode"])
-    assert service.evaluate(case_id, "sherlock", "strasse", "username").ok is True
-    assert service.evaluate(case_id, "sherlock", "STRASSE", "username").ok is True
+    assert service.evaluate(case_id, "sherlock", "jdoe", "username").ok is True
+    assert service.evaluate(case_id, "sherlock", "JDoe", "username").ok is True
+    for value in ("straße", "ﬁona", "ｆｉｏｎａ"):
+        decision = service.evaluate(case_id, "sherlock", value, "username")
+        assert decision.ok is False
+        assert "ASCII" in decision.reason
 
     ligature = "ﬁle@example.com"
     package = _package(service, case_id, [{"type": "email", "value": ligature, "method": "email_code", "tools": ["theharvester"]}])
@@ -914,3 +928,165 @@ def test_cross_platform_hits_are_ownership_unverified(tmp_path, monkeypatch):
         runner.stop()
         service.close()
         registry.close()
+
+
+def test_declared_type_cannot_send_a_person_selector_to_a_tool(tmp_path, inert_tools):
+    httpd, base, _service_obj, _email, _sms, _profiles, _provider = _http(tmp_path)
+    try:
+        case_id = _case(base)
+        gated = (
+            ("victim@example.com", ["spiderfoot"], "domain"),
+            ("victim_handle", ["spiderfoot"], "host"),
+            ("victim@example.com", ["theharvester"], "domain"),
+            ('"example.com"', ["spiderfoot"], "domain"),
+            ("+example.com", ["spiderfoot"], "domain"),
+        )
+        for selector, tools, selector_type in gated:
+            status, payload = _request(
+                base,
+                "POST",
+                f"/api/cases/{case_id}/jobs",
+                {"selector": selector, "tools": tools, "selectorType": selector_type},
+            )
+            assert status == 403, (selector, payload)
+            assert payload["refused"][0]["tool"] == tools[0]
+        assert inert_tools == []
+        assert _request(base, "GET", f"/api/cases/{case_id}/jobs")[1]["jobs"] == []
+    finally:
+        httpd.shutdown()
+        httpd.bridge.close()
+
+
+def test_organization_is_not_a_lookup_target(tmp_path, inert_tools):
+    httpd, base, _service_obj, _email, _sms, _profiles, _provider = _http(tmp_path)
+    try:
+        case_id = _case(base)
+        for body in (
+            {"selector": "Jane Doe", "tools": ["spiderfoot"], "selectorType": "organization"},
+            {"selector": "+14155550199", "tools": ["spiderfoot"], "selectorType": "organization"},
+            {"selector": "Jane Doe", "selectorType": "organization"},
+        ):
+            status, payload = _request(base, "POST", f"/api/cases/{case_id}/jobs", body)
+            assert status == 400, payload
+            assert "organization" in payload["error"]
+        assert inert_tools == []
+        assert _request(base, "GET", f"/api/cases/{case_id}/jobs")[1]["jobs"] == []
+    finally:
+        httpd.shutdown()
+        httpd.bridge.close()
+
+
+def test_job_start_classifies_the_selector_again(tmp_path, inert_tools):
+    service, *_rest = _service(tmp_path)
+    registry = CaseRegistry(tmp_path)
+    case = registry.create("reclassify")
+    runner = JobRunner(registry, workers=1, consent=service)
+    try:
+        email_job = Job(
+            id="job_0123456789ab",
+            case_id=case["id"],
+            tool="spiderfoot",
+            selector="victim@example.com",
+            selector_type="domain",
+        )
+        with pytest.raises(ConsentRequired):
+            runner._execute(email_job)
+        assert email_job.selector_type == "email"
+        harvest = Job(
+            id="job_abcdefabcdef",
+            case_id=case["id"],
+            tool="theharvester",
+            selector="victim@example.com",
+            selector_type="domain",
+        )
+        with pytest.raises(ConsentRequired):
+            runner._execute(harvest)
+        assert harvest.selector_type == "email"
+        organization = Job(
+            id="job_fedcbafedcba",
+            case_id=case["id"],
+            tool="spiderfoot",
+            selector="Jane Doe",
+            selector_type="organization",
+        )
+        with pytest.raises(AdapterError, match="organization"):
+            runner._execute(organization)
+        assert inert_tools == []
+    finally:
+        runner.stop()
+        service.close()
+        registry.close()
+
+
+def test_audit_replace_from_a_fresh_connection_is_rejected(tmp_path):
+    service, *_rest = _service(tmp_path)
+    case_id = "case_0123456789ab"
+    refused = service.evaluate(case_id, "phoneinfoga", PHONE, "phone")
+    service.audit(case_id, refused.consent_id, "phoneinfoga", "refused", selector_hash="abc", actor="local")
+    original = service.audit_entries(case_id)[0]
+    fresh = sqlite3.connect(service.path)
+    try:
+        assert fresh.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
+        for statement in (
+            "INSERT OR REPLACE INTO consent_audit"
+            "(id, case_id, consent_id, tool, selector_hash, actor, at, result)"
+            " VALUES(?, ?, NULL, 'phoneinfoga', 'rewritten', 'local', '2020-01-01T00:00:00Z', 'allowed')",
+            "REPLACE INTO consent_audit"
+            "(id, case_id, consent_id, tool, selector_hash, actor, at, result)"
+            " VALUES(?, ?, NULL, 'phoneinfoga', 'rewritten', 'local', '2020-01-01T00:00:00Z', 'allowed')",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                fresh.execute(statement, (original["id"], case_id))
+            fresh.rollback()
+        stored = fresh.execute(
+            "SELECT result, selector_hash FROM consent_audit WHERE id=?",
+            (original["id"],),
+        ).fetchone()
+        assert stored == ("refused", "abc")
+    finally:
+        fresh.close()
+        service.close()
+
+
+def test_profile_fetch_refuses_an_https_downgrade(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b"profile text"
+
+    class Opener:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, request, timeout=None):
+            self.urls.append(request.full_url)
+            if request.full_url.startswith("https://github.com/user"):
+                raise _Redirect("http://github.com/user")
+            return Response()
+
+    opener = Opener()
+    monkeypatch.setattr("casefile.delivery.urllib.request.build_opener", lambda *_args: opener)
+    fetcher = HttpProfileFetcher()
+    with pytest.raises(DeliveryError):
+        fetcher._fetch_limited("https://github.com/user")
+    assert opener.urls == ["https://github.com/user"]
+
+    class SameHost:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, request, timeout=None):
+            self.urls.append(request.full_url)
+            if request.full_url == "https://github.com/start":
+                raise _Redirect("https://github.com/landed")
+            return Response()
+
+    followed = SameHost()
+    monkeypatch.setattr("casefile.delivery.urllib.request.build_opener", lambda *_args: followed)
+    assert fetcher._fetch_limited("https://github.com/start") == "profile text"
+    assert followed.urls == ["https://github.com/start", "https://github.com/landed"]

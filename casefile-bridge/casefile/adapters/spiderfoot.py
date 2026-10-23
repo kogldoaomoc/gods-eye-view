@@ -58,10 +58,70 @@ def _account_url(raw: str) -> str | None:
     return None
 
 
+# SpiderFoot event types. The CLI has no target-type flag; it guesses from
+# the -s string (and quotes anything without a dot). These are the types we
+# will allow that guess to return.
+_TARGET_TYPES = {
+    "domain": "INTERNET_NAME",
+    "host": "INTERNET_NAME",
+    "email": "EMAILADDR",
+    "phone": "PHONE_NUMBER",
+    "username": "USERNAME",
+    "person": "HUMAN_NAME",
+}
+# Same order SpiderFootHelpers.targetTypeFromString uses. The CLI matches
+# these case-insensitively.
+_DETECTED_TYPES = (
+    (re.compile(r"^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$", re.IGNORECASE), "IP_ADDRESS"),
+    (re.compile(r"^[0-9]{1,3}(?:\.[0-9]{1,3}){3}/\d+$", re.IGNORECASE), "NETBLOCK_OWNER"),
+    (re.compile(r"^.*@.*$", re.IGNORECASE), "EMAILADDR"),
+    (re.compile(r"^\+[0-9]+$", re.IGNORECASE), "PHONE_NUMBER"),
+    (re.compile(r"^\"[^\"\n]*\s[^\"\n]*\"$", re.IGNORECASE), "HUMAN_NAME"),
+    (re.compile(r"^\".+\"$", re.IGNORECASE), "USERNAME"),
+    (re.compile(r"^[0-9]+$", re.IGNORECASE), "BGP_AS_OWNER"),
+    (re.compile(r"^[0-9a-f:]+$", re.IGNORECASE), "IPV6_ADDRESS"),
+    (re.compile(r"^[0-9a-f:]+::/[0-9]+$", re.IGNORECASE), "NETBLOCKV6_OWNER"),
+    (
+        re.compile(
+            r"^(?:[a-z0-9]|[a-z0-9][a-z0-9-]*[a-z0-9])(?:\.(?:[a-z0-9]|[a-z0-9][a-z0-9-]*[a-z0-9]))+$",
+            re.IGNORECASE,
+        ),
+        "INTERNET_NAME",
+    ),
+)
+
+
+def spiderfoot_target_type(selector_type: str, selector: str) -> str | None:
+    """The SpiderFoot event type for a selector we have already classified."""
+    if selector_type == "ip":
+        text = selector.strip()
+        if ":" in text and "/" in text:
+            return "NETBLOCKV6_OWNER"
+        if "/" in text:
+            return "NETBLOCK_OWNER"
+        if ":" in text:
+            return "IPV6_ADDRESS"
+        return "IP_ADDRESS"
+    return _TARGET_TYPES.get(selector_type)
+
+
+def spiderfoot_detected_type(selector: str) -> str | None:
+    """What ``sf.py`` would decide after its quoting step."""
+    target = selector.strip()
+    if " " in target:
+        target = f'"{target}"'
+    if "." not in target and not target.startswith("+") and '"' not in target:
+        target = f'"{target}"'
+    for pattern, name in _DETECTED_TYPES:
+        if pattern.search(target):
+            return name
+    return None
+
+
 class SpiderFootAdapter(Adapter):
     name = "spiderfoot"
     title = "SpiderFoot"
-    accepts = ("domain", "email", "ip", "host", "username", "person", "phone", "organization")
+    accepts = ("domain", "email", "ip", "host", "username", "person", "phone")
     binaries = ("sf.py", "spiderfoot")
     binary_env = "CASEFILE_SPIDERFOOT_BIN"
     homepage = "https://github.com/smicallef/spiderfoot"
@@ -73,6 +133,13 @@ class SpiderFootAdapter(Adapter):
         binary = self.binary(ctx.env)
         if not binary:
             raise AdapterError("SpiderFoot is not installed")
+        # sf.py classifies -s itself, and quotes a target with no dot into a
+        # username or a human name. Only start it when that classification is
+        # the type we already decided, and pass that type on the process.
+        target_type = spiderfoot_target_type(selector_type, selector)
+        if not target_type or spiderfoot_detected_type(selector) != target_type:
+            raise AdapterError("SpiderFoot target type does not match the selector")
+        ctx.env["SPIDERFOOT_TARGET_TYPE"] = target_type
         args = [binary, "-s", selector, "-o", "json", "-q", "-u", _USE_CASE.get(selector_type, "investigate")]
         completed = ctx.run_process(args)
         text = completed.stdout.strip()

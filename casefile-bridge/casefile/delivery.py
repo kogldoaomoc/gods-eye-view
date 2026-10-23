@@ -131,8 +131,9 @@ class _ManualRedirect(urllib.request.HTTPRedirectHandler):
 class HttpProfileFetcher:
     """Fetch the public profile text for a username on a known platform.
 
-    Redirects stay on the same hostname. A total deadline covers every hop,
-    not only one socket timeout. Path-like usernames are rejected.
+    Redirects stay on the same hostname and never drop from https to http.
+    A total deadline covers every hop, not only one socket timeout.
+    Path-like usernames are rejected.
     """
 
     def __init__(self, *, deadline_s: float = 20):
@@ -167,10 +168,8 @@ class HttpProfileFetcher:
                 return raw[:65536].decode("utf-8", "replace")
             except _Redirect as hop:
                 hops += 1
-                if hops > _MAX_REDIRECTS or not _same_hostname(current, hop.url):
+                if hops > _MAX_REDIRECTS or not _redirect_allowed(current, hop.url):
                     raise DeliveryError("could not fetch the public profile") from None
-                if urllib.parse.urlparse(hop.url).scheme not in ("http", "https"):
-                    raise DeliveryError("could not fetch the public profile")
                 current = hop.url
             except DeliveryError:
                 raise
@@ -221,6 +220,17 @@ def _same_hostname(left: str, right: str) -> bool:
     a = (urllib.parse.urlparse(left).hostname or "").casefold()
     b = (urllib.parse.urlparse(right).hostname or "").casefold()
     return bool(a) and a == b
+
+
+def _redirect_allowed(current: str, nxt: str) -> bool:
+    """Same hostname only, and never from https down to http."""
+    if not _same_hostname(current, nxt):
+        return False
+    left = urllib.parse.urlparse(current).scheme
+    right = urllib.parse.urlparse(nxt).scheme
+    if right not in ("http", "https"):
+        return False
+    return not (left == "https" and right == "http")
 
 
 class OAuthProvider:

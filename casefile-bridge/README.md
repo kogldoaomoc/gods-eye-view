@@ -126,8 +126,10 @@ python -m casefile export case_xxxxxxxxxxxx -o case.geojson --pretty
 | `CASEFILE_OAUTH_<NAME>_USER_FIELD` | JSON field holding the username (default `login`) |
 
 A username, email, phone or person selector runs only after a verified consent
-that covers the requested tool. Domain, host, IP, ASN and cert selectors stay
-ungated. The flow and the consent and audit records are described in
+that covers the requested tool. The server classifies the selector: a declared
+domain, host, IP, ASN or cert is accepted only when the string is one, and a
+detected username, email, phone or person is gated anyway. Organization is
+not a lookup target. The flow and the consent and audit records are described in
 [`../docs/CASEFILE.md`](../docs/CASEFILE.md). Optional header
 `X-Casefile-Operator` is stored on the audit row when it is a short opaque id.
 

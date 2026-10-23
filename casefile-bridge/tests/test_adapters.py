@@ -1,4 +1,7 @@
+import pytest
+
 from casefile import adapters
+from casefile.adapters.base import AdapterError
 from casefile.adapters.maigret import MaigretAdapter
 from casefile.adapters.phoneinfoga import PhoneInfogaAdapter
 from casefile.adapters.sherlock import SherlockAdapter
@@ -15,6 +18,8 @@ def test_registry_default_routing():
     assert adapters.default_tools("email") == ["theharvester"]
     assert adapters.default_tools("domain") == ["theharvester", "spiderfoot"]
     assert adapters.default_tools("person") == []
+    assert adapters.default_tools("organization") == []
+    assert "organization" not in SpiderFootAdapter.accepts
     assert "spiderfoot" in adapters.tools_for("ip")
 
 
@@ -87,3 +92,68 @@ def test_phoneinfoga_sets_country_geo():
     assert phone["type"] == "phone"
     assert phone["geo"]["country"] == "US"
     assert phone["geo"]["precision"] == "country"
+
+
+class _Process:
+    def __init__(self, stdout="[]"):
+        self.stdout = stdout
+        self.stderr = ""
+        self.returncode = 0
+
+
+class _Ctx:
+    def __init__(self, workdir=None):
+        self.env = {}
+        self.workdir = workdir
+        self.args = None
+
+    def run_process(self, args):
+        self.args = list(args)
+        return _Process()
+
+
+def test_spiderfoot_refuses_a_target_its_cli_would_reclassify(monkeypatch):
+    adapter = SpiderFootAdapter()
+    monkeypatch.setattr(adapter, "binary", lambda env: "sf.py")
+    ctx = _Ctx()
+    assert adapter.run("Example.COM", "domain", ctx) == []
+    assert ctx.env["SPIDERFOOT_TARGET_TYPE"] == "INTERNET_NAME"
+    assert ctx.args[1:3] == ["-s", "Example.COM"]
+
+    for selector, selector_type in (
+        ("victim@example.com", "domain"),
+        ("Jane Doe", "domain"),
+        ("Jane Doe", "organization"),
+        ("victim_handle", "host"),
+        ("+14155550199", "host"),
+    ):
+        blocked = _Ctx()
+        with pytest.raises(AdapterError, match="target type"):
+            adapter.run(selector, selector_type, blocked)
+        assert blocked.args is None
+
+    person = _Ctx()
+    adapter.run("Jane Doe", "person", person)
+    assert person.env["SPIDERFOOT_TARGET_TYPE"] == "HUMAN_NAME"
+    assert person.args[1:3] == ["-s", "Jane Doe"]
+
+
+def test_theharvester_domain_flag_is_a_hostname(monkeypatch, tmp_path):
+    adapter = TheHarvesterAdapter()
+    monkeypatch.setattr(adapter, "binary", lambda env: "theHarvester")
+
+    def run_process(args):
+        ctx.args = list(args)
+        (ctx.workdir / "harvest.json").write_text("{}", encoding="utf-8")
+        return _Process("{}")
+
+    ctx = _Ctx(tmp_path)
+    ctx.run_process = run_process
+    assert adapter.run("victim@example.com", "email", ctx) == {}
+    assert ctx.args[1:3] == ["-d", "example.com"]
+
+    blocked = _Ctx(tmp_path)
+    blocked.run_process = run_process
+    with pytest.raises(AdapterError, match="hostname"):
+        adapter.run("victim@example.com", "domain", blocked)
+    assert blocked.args is None

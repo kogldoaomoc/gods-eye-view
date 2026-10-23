@@ -146,6 +146,12 @@ BEFORE DELETE ON consent_audit
 BEGIN
   SELECT RAISE(ABORT, 'consent audit is append-only');
 END;
+CREATE TRIGGER IF NOT EXISTS consent_audit_no_reinsert
+BEFORE INSERT ON consent_audit
+WHEN EXISTS (SELECT 1 FROM consent_audit WHERE id = NEW.id)
+BEGIN
+  SELECT RAISE(ABORT, 'consent audit is append-only');
+END;
 """
 
 
@@ -356,10 +362,11 @@ class ConsentService:
         if selector_type not in GATED_SELECTOR_TYPES:
             return Decision(True, tool, "selector type is not gated", None)
         try:
-            normalized = schema.normalize_value(selector_type, unicodedata.normalize("NFKC", selector))
-        except schema.SchemaError:
-            return Decision(False, tool, "identifier could not be normalized", None)
-        digest = self._identifier_hash(selector_type, _hash_form(selector_type, normalized))
+            normalized = _normalize_identifier(selector_type, selector)
+            digest = self._identifier_hash(selector_type, _hash_form(selector_type, normalized))
+        except schema.SchemaError as error:
+            reason = str(error) if "ASCII" in str(error) else "identifier could not be normalized"
+            return Decision(False, tool, reason, None)
         rows = self._conn.execute(
             "SELECT id, case_id, identifier_hash, identifier_type, method, platform, verified_at, tools, expires_at, revoked_at"
             " FROM consents WHERE case_id=? AND identifier_hash=? ORDER BY verified_at DESC",
@@ -488,7 +495,8 @@ class ConsentService:
         if len(raw) > 320:
             raise ConsentError("identifier value is too long", status=400)
         try:
-            normalized = schema.normalize_value(identifier_type, unicodedata.normalize("NFKC", raw))
+            normalized = _normalize_identifier(identifier_type, raw)
+            hash_form = _hash_form(identifier_type, normalized)
         except schema.SchemaError as error:
             raise ConsentError(str(error), status=400) from None
         platform = item.get("platform")
@@ -519,7 +527,7 @@ class ConsentService:
         return {
             "type": identifier_type,
             "destination": normalized,
-            "hash_form": _hash_form(identifier_type, normalized),
+            "hash_form": hash_form,
             "method": method,
             "platform": platform or None,
             "tools": _tools_for(item.get("tools"), identifier_type),
@@ -653,10 +661,11 @@ class ConsentService:
         except Exception:
             raise ConsentError("oauth sign-in was not accepted", status=400) from None
         try:
-            normalized = schema.normalize_value("username", unicodedata.normalize("NFKC", str(subject)))
+            normalized = schema.normalize_value("username", str(subject))
+            form = _hash_form("username", normalized)
         except schema.SchemaError:
             raise ConsentError("oauth identity does not match the identifier", status=400) from None
-        actual = self._identifier_hash("username", _hash_form("username", normalized))
+        actual = self._identifier_hash("username", form)
         if not hmac.compare_digest(actual, row["identifier_hash"]):
             raise ConsentError("oauth identity does not match the identifier", status=400)
 
@@ -842,9 +851,24 @@ def _tools_for(requested, identifier_type: str) -> list[str]:
     return chosen
 
 
+def _normalize_identifier(identifier_type: str, raw: str) -> str:
+    """NFKC emails and person names. Usernames are not compatibility-folded."""
+    if identifier_type == "username":
+        return schema.normalize_value(identifier_type, raw)
+    return schema.normalize_value(identifier_type, unicodedata.normalize("NFKC", raw))
+
+
 def _hash_form(identifier_type: str, normalized: str) -> str:
+    # Usernames are not casefolded through NFKC. Casefold maps ß to ss, and
+    # NFKC maps ligatures and fullwidth letters onto ASCII, so a consent for
+    # one username would authorize a different one. Non-ASCII usernames are
+    # refused. ASCII still casefolds, so JDoe and jdoe stay one identifier.
+    if identifier_type == "username":
+        if not normalized.isascii():
+            raise schema.SchemaError("usernames must be ASCII")
+        return normalized.casefold()
     text = unicodedata.normalize("NFKC", normalized)
-    if identifier_type in ("username", "email", "person"):
+    if identifier_type in ("email", "person"):
         return text.casefold()
     return text
 
