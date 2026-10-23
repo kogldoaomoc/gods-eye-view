@@ -22,6 +22,8 @@ const COLORS = ['#39d0ff', '#ffb547', '#5dff9f', '#ff6b6b', '#8be9ff'];
  * Wire the Import control.
  * @param {{viewer: object, load?: Function, document?: Document}} deps
  *   `load(file, {viewer, color})` defaults to `loadGeoFile`; tests pass a double.
+ *   `library` (optional) keeps GeoJSON on this device when `#geo-import-keep`
+ *   is checked, restores kept files on start and deletes them on Remove.
  * @returns {{destroy: Function, importFiles: Function, list: Function,
  *   setVisible: Function, flyTo: Function, remove: Function,
  *   diagnostics: Function}|null}
@@ -34,11 +36,13 @@ export function initGeoFileImport({
   navigation = null,
   ground = null,
   subscribeMapSource = null,
+  library = null,
 }) {
   const button = doc?.getElementById('geo-import-button');
   const input = doc?.getElementById('geo-import-input');
   const listEl = doc?.getElementById('geo-import-list');
   const hint = doc?.getElementById('geo-import-hint');
+  const keep = doc?.getElementById('geo-import-keep');
   if (!viewer || !button || !input || !listEl) return null;
 
   const imports = [];
@@ -253,6 +257,7 @@ export function initGeoFileImport({
     const [item] = imports.splice(at, 1);
     viewer.dataSources?.remove?.(item.dataSource, true);
     item.revoke?.();
+    if (item.datasetId) void library?.remove(item.datasetId).catch(() => {});
     renderList(keep);
     render();
     return true;
@@ -326,6 +331,7 @@ export function initGeoFileImport({
         dataSource: loaded.dataSource,
         revoke: loaded.revoke,
         refreshGround: loaded.refreshGround,
+        datasetId: file?.gevDatasetId,
       };
       await viewer.dataSources.add(item.dataSource);
       if (destroyed) {
@@ -335,6 +341,18 @@ export function initGeoFileImport({
       }
       loaded.mount?.();
       imports.push(item);
+      if (
+        !item.datasetId &&
+        keep?.checked &&
+        library &&
+        item.format === 'geojson'
+      ) {
+        try {
+          item.datasetId = (await library.save(file)).id;
+        } catch {
+          outcomes.notKept = (outcomes.notKept || 0) + 1;
+        }
+      }
       renderList();
       render();
       outcomes.push({
@@ -352,7 +370,12 @@ export function initGeoFileImport({
       )
         fly(item);
     }
-    if (!destroyed) setHint(summarize(outcomes));
+    if (!destroyed)
+      setHint(
+        outcomes.notKept
+          ? `${summarize(outcomes)} ${t('Some files could not be kept on this device.')}`
+          : summarize(outcomes),
+      );
     return outcomes;
   }
 
@@ -416,6 +439,14 @@ export function initGeoFileImport({
   });
 
   renderList();
+  // Kept files return without moving the camera; nothing opens IndexedDB
+  // unless something was kept before.
+  if (library?.hasSaved()) {
+    queue = queue
+      .then(() => library.restore())
+      .then((files) => files.length && importBatch(files, false, -1))
+      .catch(() => {});
+  }
 
   const handle = {
     importFiles,

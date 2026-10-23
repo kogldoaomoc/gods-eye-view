@@ -152,6 +152,7 @@
         <span class="pp-icon material-symbols-outlined" aria-hidden="true">upload_file</span>
         <span class="pp-label" data-i18n>Import</span>
       </button>
+      <label class="geo-import-keep" title="Save imported GeoJSON in this browser so it returns after a reload. Nothing is uploaded; Remove deletes the saved copy." data-i18n-title><input type="checkbox" id="geo-import-keep"> <span data-i18n>Keep on this device</span></label>
       <input type="file" id="geo-import-input" accept=".geojson,.json,.kml,.kmz,.gpx" multiple hidden aria-label="Choose GeoJSON, KML, KMZ or GPX files" data-i18n-aria-label>
       <ul class="geo-import-list" id="geo-import-list" aria-label="Imported files" data-i18n-aria-label></ul>
       <span class="draw-hint geo-import-hint" id="geo-import-hint" aria-live="polite"></span>

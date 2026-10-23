@@ -1,0 +1,16 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "x",
+      "geometry": { "type": "Point", "coordinates": [0, 0] },
+      "properties": {
+        "name": "<img src=x onerror=alert(1)>",
+        "description": "<script>alert('x')</script><b>bold</b>",
+        "style": "background:url(javascript:alert(1))",
+        "link": "javascript:alert(1)"
+      }
+    }
+  ]
+}

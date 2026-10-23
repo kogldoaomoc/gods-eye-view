@@ -135,13 +135,21 @@ class FakeElement {
   }
 }
 
-function setup({ load, navigation, flyToSource, subscribeMapSource } = {}) {
+function setup({
+  load,
+  navigation,
+  flyToSource,
+  subscribeMapSource,
+  library,
+  keep,
+} = {}) {
   focus.active = null;
   const els = {
     'geo-import-button': new FakeElement('button', 'geo-import-button'),
     'geo-import-input': new FakeElement('input', 'geo-import-input'),
     'geo-import-list': new FakeElement('ul', 'geo-import-list'),
     'geo-import-hint': new FakeElement('span', 'geo-import-hint'),
+    ...(keep ? { 'geo-import-keep': keep } : {}),
   };
   const document = {
     body: new FakeElement('body'),
@@ -192,6 +200,7 @@ function setup({ load, navigation, flyToSource, subscribeMapSource } = {}) {
     document,
     ...(navigation ? { navigation } : {}),
     ...(subscribeMapSource ? { subscribeMapSource } : {}),
+    ...(library ? { library } : {}),
     flyToSource: flyToSource || ((_viewer, ds) => flights.push(ds)),
   });
   return {
@@ -728,4 +737,40 @@ test('the map-object count in a row title keeps digit grouping', async () => {
   const [row] = rows(t.els);
   assert.match(row.children[1].title, /12,345 map objects/);
   t.tool.destroy();
+});
+
+test('Keep on this device saves GeoJSON, restores it without flying and deletes on Remove', async () => {
+  const calls = [];
+  let saved = false;
+  const library = {
+    hasSaved: () => saved,
+    save: async (f) => (calls.push(['save', f.name]), { id: `ds-${f.name}` }),
+    restore: async () => [file('kept.geojson', { gevDatasetId: 'ds-kept' })],
+    remove: async (id) => calls.push(['remove', id]),
+  };
+  const keep = { checked: false };
+  const t = setup({ library, keep });
+  await t.tool.importFiles([file('off.geojson')]);
+  assert.deepEqual(calls, [], 'unchecked: nothing is kept');
+  keep.checked = true;
+  await t.tool.importFiles([file('on.geojson')]);
+  assert.deepEqual(calls, [['save', 'on.geojson']]);
+  t.tool.remove(t.tool.list()[1].id);
+  await Promise.resolve();
+  assert.deepEqual(calls.at(-1), ['remove', 'ds-on.geojson']);
+  t.tool.destroy();
+
+  saved = true;
+  const r = setup({ library, keep: { checked: false } });
+  await r.tool.importFiles([]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    r.tool.list().map((i) => i.name),
+    ['kept.geojson'],
+  );
+  assert.equal(r.flights.length, 0, 'restoring never moves the camera');
+  r.tool.remove(r.tool.list()[0].id);
+  await Promise.resolve();
+  assert.deepEqual(calls.at(-1), ['remove', 'ds-kept']);
+  r.tool.destroy();
 });

@@ -1,0 +1,28 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "hut-1",
+      "geometry": { "type": "Point", "coordinates": [16.3725042, 48.2083537, 171.5] },
+      "properties": { "name": "Survey hut", "time": "2026-10-01T08:30:00Z", "count": 3, "tags": ["a", "b"], "nested": { "k": null } }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "LineString", "coordinates": [[16.37, 48.2], [16.38, 48.21]] },
+      "properties": null
+    },
+    {
+      "type": "Feature",
+      "id": 7,
+      "geometry": { "type": "MultiPolygon", "coordinates": [[[[16.3, 48.1], [16.4, 48.1], [16.4, 48.2], [16.3, 48.1]]]] },
+      "properties": { "area": "park" }
+    },
+    {
+      "type": "Feature",
+      "id": "hut-1",
+      "geometry": null,
+      "properties": { "note": "duplicate id, no geometry" }
+    }
+  ]
+}

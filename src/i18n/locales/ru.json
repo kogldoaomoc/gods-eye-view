@@ -3014,5 +3014,8 @@
   "Layers": "Слои",
   "Search": "Поиск",
   "More": "Ещё",
-  "Panels": "Панели"
+  "Panels": "Панели",
+  "Keep on this device": "Сохранять на этом устройстве",
+  "Save imported GeoJSON in this browser so it returns after a reload. Nothing is uploaded; Remove deletes the saved copy.": "Сохраняет импортированный GeoJSON в этом браузере, чтобы он вернулся после перезагрузки. Ничего не загружается; «Удалить» стирает сохранённую копию.",
+  "Some files could not be kept on this device.": "Некоторые файлы не удалось сохранить на этом устройстве."
 }

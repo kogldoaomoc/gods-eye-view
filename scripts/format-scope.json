@@ -34,6 +34,7 @@
   "src/annotations/drawTool.test.mjs",
   "src/data/geoFileImport.test.mjs",
   "src/ui/geoFileImport.test.mjs",
+  "src/data/import/normalize.test.mjs",
   "src/annotations/adminOutline.test.mjs",
   "src/annotations/regionRing.test.mjs",
   "src/data/adminBoundaries.test.mjs",

@@ -2813,5 +2813,8 @@
   "Layers": "图层",
   "Search": "搜索",
   "More": "更多",
-  "Panels": "面板"
+  "Panels": "面板",
+  "Keep on this device": "保存在此设备上",
+  "Save imported GeoJSON in this browser so it returns after a reload. Nothing is uploaded; Remove deletes the saved copy.": "将导入的 GeoJSON 保存在此浏览器中，重新加载后仍会显示。不会上传任何内容；移除会删除已保存的副本。",
+  "Some files could not be kept on this device.": "部分文件无法保存在此设备上。"
 }

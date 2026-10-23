@@ -2947,5 +2947,8 @@
   "Layers": "Capas",
   "Search": "Buscar",
   "More": "Más",
-  "Panels": "Paneles"
+  "Panels": "Paneles",
+  "Keep on this device": "Guardar en este dispositivo",
+  "Save imported GeoJSON in this browser so it returns after a reload. Nothing is uploaded; Remove deletes the saved copy.": "Guarda el GeoJSON importado en este navegador para que vuelva tras recargar. No se sube nada; Quitar elimina la copia guardada.",
+  "Some files could not be kept on this device.": "Algunos archivos no se pudieron guardar en este dispositivo."
 }
